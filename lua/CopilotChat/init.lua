@@ -4,6 +4,7 @@ local context = require('CopilotChat.context')
 local client = require('CopilotChat.client')
 local notify = require('CopilotChat.notify')
 local utils = require('CopilotChat.utils')
+local mcp = require('CopilotChat.mcp.client')
 
 local PLUGIN_NAME = 'CopilotChat'
 local WORD = '([^%s]+)'
@@ -12,6 +13,7 @@ local WORD_INPUT = '([^%s:]+:`[^`]+`)'
 ---@class CopilotChat
 ---@field config CopilotChat.config
 ---@field chat CopilotChat.ui.Chat
+---@field mcp_client CopilotChat.mcp.Client
 local M = {}
 
 --- @class CopilotChat.source
@@ -63,10 +65,10 @@ local function insert_sticky(prompt, config, override_sticky)
   end
 
   if
-    config.remember_as_sticky
-    and config.system_prompt
-    and config.system_prompt ~= M.config.system_prompt
-    and M.config.prompts[config.system_prompt]
+      config.remember_as_sticky
+      and config.system_prompt
+      and config.system_prompt ~= M.config.system_prompt
+      and M.config.prompts[config.system_prompt]
   then
     stickies:set('/' .. config.system_prompt, true)
   end
@@ -691,12 +693,17 @@ function M.open(config)
     end
   end
 
+  M.mcp_client = mcp:new('mcp-local-fs')
+  log.debug("starting mcp client")
+  M.mcp_client:start()
+
   M.chat:follow()
   M.chat:focus()
 end
 
 --- Close the chat window.
 function M.close()
+  M.mcp_client:stop()
   M.chat:close(state.source and state.source.bufnr or nil)
 end
 
@@ -786,18 +793,18 @@ function M.select_prompt(config)
   table.sort(keys)
 
   local choices = vim
-    .iter(keys)
-    :map(function(name)
-      return {
-        name = name,
-        description = prompts[name].description,
-        prompt = prompts[name].prompt,
-      }
-    end)
-    :filter(function(choice)
-      return choice.prompt
-    end)
-    :totable()
+      .iter(keys)
+      :map(function(name)
+        return {
+          name = name,
+          description = prompts[name].description,
+          prompt = prompts[name].prompt,
+        }
+      end)
+      :filter(function(choice)
+        return choice.prompt
+      end)
+      :totable()
 
   vim.ui.select(choices, {
     prompt = 'Select prompt action> ',
@@ -873,7 +880,7 @@ function M.ask(prompt, config)
     local embeddings, prompt = M.resolve_context(prompt, config)
 
     local query_ok, filtered_embeddings =
-      pcall(context.filter_embeddings, prompt, selected_model, config.headless, embeddings)
+        pcall(context.filter_embeddings, prompt, selected_model, config.headless, embeddings)
 
     if not query_ok then
       utils.schedule_main()

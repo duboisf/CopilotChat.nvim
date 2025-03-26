@@ -138,15 +138,15 @@ local function generate_selection_messages(selection)
     out = out .. string.format('Excerpt from %s, lines %s to %s:\n', filename, selection.start_line, selection.end_line)
   end
   out = out
-    .. string.format(
-      '```%s\n%s\n```',
-      filetype,
-      generate_content_block(content, nil, BIG_FILE_THRESHOLD, selection.start_line)
-    )
+      .. string.format(
+        '```%s\n%s\n```',
+        filetype,
+        generate_content_block(content, nil, BIG_FILE_THRESHOLD, selection.start_line)
+      )
 
   if selection.diagnostics then
     out = out
-      .. string.format("\nDiagnostics in user's active selection:\n%s", generate_diagnostics(selection.diagnostics))
+        .. string.format("\nDiagnostics in user's active selection:\n%s", generate_diagnostics(selection.diagnostics))
   end
 
   return {
@@ -177,11 +177,11 @@ local function generate_embeddings_messages(embeddings)
 
     if embedding.diagnostics then
       out = out
-        .. string.format(
-          '\nFILE:%s DIAGNOSTICS:\n%s',
-          embedding.filename:upper(),
-          generate_diagnostics(embedding.diagnostics)
-        )
+          .. string.format(
+            '\nFILE:%s DIAGNOSTICS:\n%s',
+            embedding.filename:upper(),
+            generate_diagnostics(embedding.diagnostics)
+          )
     end
 
     return {
@@ -551,6 +551,7 @@ function Client:ask(prompt, opts)
   local errored = false
   local finished = false
   local response_buffer = utils.string_buffer()
+  local tool_calls = {}
 
   local function finish_stream(err, job)
     if err then
@@ -604,9 +605,16 @@ function Client:ask(prompt, opts)
       end
     end
 
+    if out.tool_calls then
+      for _, tool_call in ipairs(out.tool_calls) do
+        log.debug('Tool call:', vim.inspect(tool_call))
+        table.insert(tool_calls, tool_call)
+      end
+    end
+
     if out.finish_reason then
       local reason = out.finish_reason
-      if reason == 'stop' then
+      if reason == 'stop' or reason == 'tool_calls' then
         reason = nil
       else
         reason = 'Early stop: ' .. reason
@@ -660,6 +668,7 @@ function Client:ask(prompt, opts)
     generate_ask_request(history, opts.contexts, prompt, opts.system_prompt, generated_messages),
     options
   )
+  -- dump(request)
   local is_stream = request.stream
 
   local args = {
@@ -693,9 +702,9 @@ function Client:ask(prompt, opts)
         local content = utils.json_decode(response.body)
         if content.authorize_url then
           error_msg = 'Failed to authenticate. Visit following url to authorize '
-            .. content.slug
-            .. ':\n'
-            .. content.authorize_url
+              .. content.slug
+              .. ':\n'
+              .. content.authorize_url
         end
       else
         error_msg = 'Failed to get response: ' .. tostring(response.status) .. '\n' .. response.body
@@ -716,6 +725,7 @@ function Client:ask(prompt, opts)
   end
 
   if is_stream then
+    -- dump(response.body)
     if utils.empty(response_text) then
       for _, line in ipairs(vim.split(response.body, '\n')) do
         parse_stream_line(line)
@@ -725,7 +735,8 @@ function Client:ask(prompt, opts)
     parse_line(response.body)
   end
 
-  if utils.empty(response_text) then
+  if tool_calls then
+  elseif utils.empty(response_text) then
     error('Failed to get response: empty response')
     return
   end

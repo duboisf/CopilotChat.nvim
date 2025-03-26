@@ -756,8 +756,8 @@ end
 ---@return string
 function M.glob_to_pattern(g)
   local p = '^' -- pattern being built
-  local i = 0 -- index in g
-  local c -- char at index i in g.
+  local i = 0   -- index in g
+  local c       -- char at index i in g.
 
   -- unescape glob char
   local function unescape()

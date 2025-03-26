@@ -131,12 +131,12 @@ M.copilot = {
     end
 
     return {
-      ['Authorization'] = 'Bearer ' .. response.body.token,
-      ['Editor-Version'] = EDITOR_VERSION,
-      ['Editor-Plugin-Version'] = 'CopilotChat.nvim/*',
-      ['Copilot-Integration-Id'] = 'vscode-chat',
-    },
-      response.body.expires_at
+          ['Authorization'] = 'Bearer ' .. response.body.token,
+          ['Editor-Version'] = EDITOR_VERSION,
+          ['Editor-Plugin-Version'] = 'CopilotChat.nvim/*',
+          ['Copilot-Integration-Id'] = 'vscode-chat',
+        },
+        response.body.expires_at
   end,
 
   get_agents = function(headers)
@@ -169,22 +169,22 @@ M.copilot = {
     end
 
     local models = vim
-      .iter(response.body.data)
-      :filter(function(model)
-        return model.capabilities.type == 'chat'
-      end)
-      :map(function(model)
-        return {
-          id = model.id,
-          name = model.name,
-          tokenizer = model.capabilities.tokenizer,
-          max_input_tokens = model.capabilities.limits.max_prompt_tokens,
-          max_output_tokens = model.capabilities.limits.max_output_tokens,
-          policy = not model['policy'] or model['policy']['state'] == 'enabled',
-          version = model.version,
-        }
-      end)
-      :totable()
+        .iter(response.body.data)
+        :filter(function(model)
+          return model.capabilities.type == 'chat'
+        end)
+        :map(function(model)
+          return {
+            id = model.id,
+            name = model.name,
+            tokenizer = model.capabilities.tokenizer,
+            max_input_tokens = model.capabilities.limits.max_prompt_tokens,
+            max_output_tokens = model.capabilities.limits.max_output_tokens,
+            policy = not model['policy'] or model['policy']['state'] == 'enabled',
+            version = model.version,
+          }
+        end)
+        :totable()
 
     local version_map = {}
     for _, model in ipairs(models) do
@@ -241,6 +241,29 @@ M.copilot = {
       out.max_tokens = opts.model.max_output_tokens
     end
 
+
+    out.tools = {
+      {
+        type = "function",
+        ["function"] = {
+          name = "gh_get_latest_action",
+          description = "get the latest version of a GitHub Action",
+          parameters = {
+            ["$schema"] = "https://json-schema.org/draft/2020-12/schema",
+            properties = {
+              name = {
+                description = "The name of the GitHub Action",
+                type = "string"
+              }
+            },
+            required = { "name" },
+            type = "object"
+          }
+        }
+      }
+    }
+
+    dump(out)
     return out
   end,
 
@@ -268,12 +291,16 @@ M.copilot = {
 
     local content = message.message and message.message.content or message.delta and message.delta.content
 
+    local tool_calls = message.message and message.message.tool_calls or message.delta and message.delta.tool_calls or {}
+
     local usage = message.usage and message.usage.total_tokens or output.usage and output.usage.total_tokens
 
     local finish_reason = message.finish_reason or message.done_reason or output.finish_reason or output.done_reason
 
+    dump(tool_calls)
     return {
       content = content,
+      tool_calls = tool_calls,
       finish_reason = finish_reason,
       total_tokens = usage,
       references = references,
@@ -307,8 +334,8 @@ M.github_models = {
       json_response = true,
       body = {
         filters = {
-          { field = 'freePlayground', values = { 'true' }, operator = 'eq' },
-          { field = 'labels', values = { 'latest' }, operator = 'eq' },
+          { field = 'freePlayground', values = { 'true' },   operator = 'eq' },
+          { field = 'labels',         values = { 'latest' }, operator = 'eq' },
         },
         order = {
           { field = 'displayName', direction = 'asc' },
@@ -321,20 +348,20 @@ M.github_models = {
     end
 
     return vim
-      .iter(response.body.summaries)
-      :filter(function(model)
-        return vim.tbl_contains(model.inferenceTasks, 'chat-completion')
-      end)
-      :map(function(model)
-        return {
-          id = model.name,
-          name = model.displayName,
-          tokenizer = 'o200k_base',
-          max_input_tokens = model.modelLimits.textLimits.inputContextWindow,
-          max_output_tokens = model.modelLimits.textLimits.maxOutputTokens,
-        }
-      end)
-      :totable()
+        .iter(response.body.summaries)
+        :filter(function(model)
+          return vim.tbl_contains(model.inferenceTasks, 'chat-completion')
+        end)
+        :map(function(model)
+          return {
+            id = model.name,
+            name = model.displayName,
+            tokenizer = 'o200k_base',
+            max_input_tokens = model.modelLimits.textLimits.inputContextWindow,
+            max_output_tokens = model.modelLimits.textLimits.maxOutputTokens,
+          }
+        end)
+        :totable()
   end,
 
   prepare_input = M.copilot.prepare_input,
