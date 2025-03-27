@@ -105,7 +105,7 @@ end
 
 ---@class CopilotChat.Provider.output
 ---@field content string
----@field tool_calls table
+---@field tool_calls CopilotChat.ToolCall[]
 ---@field finish_reason string?
 ---@field total_tokens number?
 ---@field references table<CopilotChat.Provider.reference>?

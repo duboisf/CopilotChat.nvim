@@ -31,6 +31,7 @@ function M:start()
       -- change to "pipe" or "file" based on your needs
       on_stdout = function(job_id, data, event)
         if data then
+          log.debug("on_stdout: data=", data)
           for _, line in ipairs(data) do
             if line ~= "" then
               local message, err = utils.json_decode(line)

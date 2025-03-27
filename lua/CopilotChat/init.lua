@@ -6,6 +6,12 @@ local notify = require('CopilotChat.notify')
 local utils = require('CopilotChat.utils')
 local mcp = require('CopilotChat.mcp.client')
 
+local dlog = require('plenary.log').new(
+  {
+    plugin = "copilot-debug", level = "debug", outfile = "/tmp/copilot-debug-logs.txt"
+  }, false
+)
+
 local noop = function() end
 
 local PLUGIN_NAME = 'CopilotChat'
@@ -102,11 +108,6 @@ local state = {
   highlights_loaded = false,
 }
 
----@class CopilotChat.ToolCall
----@field name string The name of the tool
----@field description string The description of the tool
----@field inputSchema table The JSON schema for the tool's input
-
 --- Insert sticky values from config into prompt
 ---@param prompt string
 ---@param config CopilotChat.config.shared
@@ -182,6 +183,53 @@ local function insert_sticky(prompt, config, override_sticky)
   end
 
   return table.concat(prompt_lines, '\n')
+end
+
+---@class CopilotChat.ToolMessage
+---@field content string The content of the tool call result
+---@field name string The name of the tool
+---@field role string The role of the message (tool)
+---@field tool_call_id string The ID of the tool call
+
+
+--- Handle tool calls and return the results
+--- @param tool_calls CopilotChat.ToolCall[]
+--- @return CopilotChat.ToolMessage[]
+local function handle_tool_calls(tool_calls)
+  --- @type CopilotChat.ToolMessage[]
+  local tool_call_results = {}
+  local co = coroutine.create(function()
+    tool_calls = tool_calls or {}
+    for _, tool_call in ipairs(tool_calls) do
+      local func = tool_call["function"]
+      local args = utils.json_decode(func.arguments)
+      if not args then
+        log.error(args)
+        return
+      end
+
+      local err, result = M.mcp_client:call_tool_sync(func.name, args)
+
+      log.debug(string.format("tool %s returned: err=%s, result=%s", func.name, vim.inspect(err), vim.inspect(result)))
+
+      if err or result == nil then
+        log.error(string.format("error calling tool %s: %s", func.name, err))
+        return
+      end
+      log.debug(string.format("tool %s returned: %s", func.name, vim.inspect(result)))
+      for _, content in ipairs(result.content) do
+        table.insert(tool_call_results, {
+          content = content.text,
+          name = func.name,
+          role = 'tool',
+          tool_call_id = tool_call.id,
+        })
+      end
+    end
+  end)
+
+  coroutine.resume(co)
+  return tool_call_results
 end
 
 --- Update the highlights for chat buffer
@@ -1002,30 +1050,23 @@ function M.ask(prompt, config)
           M.chat:append(token)
         end
       end),
+      on_tool_call = vim.schedule_wrap(function(tool_call)
+        ---@type CopilotChat.ToolCall
+        tool_call = tool_call
+        local func = tool_call["function"]
+        if not config.headless then
+          local args = func.arguments
+          if #args > 100 then
+            args = string.sub(args, 1, 96) .. '...}'
+          end
+          M.chat:append(string.format("🛠️ Want to use %s with args %s", func.name, args))
+        end
+      end),
     })
 
     utils.schedule_main()
 
-    local tool_call_results = {}
-    local co = coroutine.create(function()
-      tool_calls = tool_calls or {}
-      for _, tool_call in ipairs(tool_calls) do
-        local func = tool_call["function"]
-        local args = utils.json_decode(func.arguments)
-        if not args then
-          log.error(args)
-          return
-        end
-        local err, result = M.mcp_client:call_tool_sync(func.name, args)
-        if err then
-          log.error(string.format("error calling tool %s: %s", func.name, err))
-          return
-        end
-        log.debug(string.format("tool %s returned: %s", func.name, vim.inspect(result)))
-      end
-    end)
-
-    coroutine.resume(co)
+    local tool_call_results = handle_tool_calls(tool_calls)
 
     if not ask_ok then
       log.error(response)
@@ -1036,7 +1077,8 @@ function M.ask(prompt, config)
     end
 
     -- If there was no error and no response, it means job was cancelled
-    if response == nil then
+    if response == nil and not tool_call_results then
+      dlog.debug('no response and not tool call results, returning early')
       return
     end
 
@@ -1045,16 +1087,38 @@ function M.ask(prompt, config)
     if out == nil then
       out = response
     end
-    local to_store = not config.headless and out
-    if to_store and to_store ~= '' then
+
+    local to_store = not config.headless
+    dlog.debug('to_store=', to_store)
+    if to_store then
+      -- store user prompt to history
       table.insert(client.history, {
         content = prompt,
         role = 'user',
       })
-      table.insert(client.history, {
-        content = to_store,
-        role = 'assistant',
-      })
+      -- store tool calls to history
+      if tool_calls then
+        for _, tool_call in ipairs(tool_calls) do
+          table.insert(client.history, {
+            content = tool_call,
+            role = 'tool',
+          })
+        end
+      end
+      -- store tool call responses to history
+      if tool_call_results then
+        for _, tool_call_result in ipairs(tool_call_results) do
+          table.insert(client.history, tool_call_result)
+        end
+      end
+      -- store assistant response to history
+      if out and out ~= '' then
+        table.insert(client.history, {
+          content = out,
+          role = 'assistant',
+        })
+      end
+      dlog.debug('client.history=', client.history)
     end
 
     if not config.headless then

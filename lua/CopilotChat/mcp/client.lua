@@ -110,25 +110,30 @@ function M:call_tool(name, arguments, callback)
   }, callback)
 end
 
----Call a tool on the server synchronously.
----@param name string Tool name
----@param arguments table Arguments for the tool
----@return string|table|nil, table|nil
+---@class CopilotChat.mcp.ToolResult
+---@field err any|nil Error message or nil if successful
+---@field result any|nil Result of the tool
+
+--- Call a tool on the server synchronously.
+--- This function must be called within a coroutine.
+--- @param name string Tool name
+--- @param arguments table Arguments for the tool
+--- @return string|table|nil err, table|nil result
 function M:call_tool_sync(name, arguments)
   local co = coroutine.running()
   if not co then
     error("call_tool_sync must be called within a coroutine")
   end
 
-  local callback_err, callback_result
+  ---@type CopilotChat.mcp.ToolResult
+  local res = {}
   self:call_tool(name, arguments, function(err, result)
-    callback_err = err
-    callback_result = result
+    res = { err = err, result = result }
     coroutine.resume(co)
   end)
 
   coroutine.yield()
-  return callback_err, callback_result
+  return res.err, res.result
 end
 
 ---List available resources from the server.

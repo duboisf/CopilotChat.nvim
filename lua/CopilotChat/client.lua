@@ -9,12 +9,19 @@
 ---@field temperature number
 ---@field tools CopilotChat.mcp.ToolList
 ---@field on_progress? fun(response: string):nil
+---@field on_tool_call? fun(tool_call: CopilotChat.ToolCall):nil
 
 ---@class CopilotChat.Client.model : CopilotChat.Provider.model
 ---@field provider string
 
 ---@class CopilotChat.Client.agent : CopilotChat.Provider.agent
 ---@field provider string
+
+local dlog = require('plenary.log').new(
+  {
+    plugin = "copilot-debug", level = "debug", outfile = "/tmp/copilot-debug-logs.txt"
+  }, false
+)
 
 local log = require('plenary.log')
 local tiktoken = require('CopilotChat.tiktoken')
@@ -572,6 +579,7 @@ function Client:ask(prompt, opts)
   end
 
   local function parse_line(line, job)
+    dlog.debug('parse_line: line=', line)
     if not line or line == '' then
       return
     end
@@ -610,8 +618,8 @@ function Client:ask(prompt, opts)
 
     if out.tool_calls then
       for _, tool_call in ipairs(out.tool_calls) do
-        log.debug('tool_call:', vim.inspect(tool_call))
         table.insert(tool_calls, tool_call)
+        opts.on_tool_call(tool_call)
       end
     end
 
@@ -635,6 +643,9 @@ function Client:ask(prompt, opts)
     end
 
     line = line:gsub('^data:%s*', '')
+    if line:find("tool_call") then
+      dlog.debug('parse_stream_line: tool_call', line)
+    end
     if line == '[DONE]' then
       finish_stream(nil, job)
       return
@@ -672,7 +683,9 @@ function Client:ask(prompt, opts)
     options
   )
 
-  log.debug('request:', vim.inspect(request))
+  local tmp_request = vim.tbl_deep_extend('force', {}, request)
+  tmp_request.tools = nil
+  dlog.debug('request:', tmp_request)
 
   local is_stream = request.stream
 
@@ -730,8 +743,8 @@ function Client:ask(prompt, opts)
   end
 
   if is_stream then
-    -- dump(response.body)
-    if utils.empty(response_text) then
+    dlog.debug('got full response, response_text=', response_text)
+    if utils.empty(response_text) and #tool_calls == 0 then
       for _, line in ipairs(vim.split(response.body, '\n')) do
         parse_stream_line(line)
       end
@@ -740,8 +753,7 @@ function Client:ask(prompt, opts)
     parse_line(response.body)
   end
 
-  if tool_calls then
-  elseif utils.empty(response_text) then
+  if #tool_calls == 0 and utils.empty(response_text) then
     error('Failed to get response: empty response')
     return
   end
