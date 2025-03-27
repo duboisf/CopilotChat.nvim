@@ -6,14 +6,80 @@ local notify = require('CopilotChat.notify')
 local utils = require('CopilotChat.utils')
 local mcp = require('CopilotChat.mcp.client')
 
+local noop = function() end
+
 local PLUGIN_NAME = 'CopilotChat'
 local WORD = '([^%s]+)'
 local WORD_INPUT = '([^%s:]+:`[^`]+`)'
 
+
+-- Example CopilotChat.Tool:
+-- {
+--   ["function"] = {
+--     description = "searches for a string in a file or directory",
+--     name = "fs_search",
+--     parameters = {
+--       ["$schema"] = "https://json-schema.org/draft/2020-12/schema",
+--       properties = {
+--         path = {
+--           description = "The path to search",
+--           type = "string"
+--         },
+--         search = {
+--           description = "The plain string to search for",
+--           type = "string"
+--         }
+--       },
+--       required = { "search", "path" },
+--       type = "object"
+--     }
+--   },
+--   type = "function"
+-- }
+
+---@class CopilotChat.Tool
+---@field type string
+---@field ["function"] CopilotChat.Function The function to metadata
+
+---@class CopilotChat.Function
+---@field name string The name of the function
+---@field description string The description of the function
+---@field parameters table The JSON schema for the function's input
+
+---@class CopilotChat.Function.Parameters
+---@field ["$schema"] string URL to the JSON schema
+---@field properties CopilotChat.Function.Parameter The properties of the schema
+---@field required string[]
+---@field type string
+
+---@class CopilotChat.Function.Parameter
+---@field description string The description of the parameter
+---@field type string The type of the parameter
+
+-- Example CopilotChat.ToolCall:
+-- {
+--   ["function"] = {
+--     arguments = '{"name":"actions/checkout"}',
+--     name = "gh_get_latest_action"
+--   },
+--   id = "call_MHxrczF5NjZKTmNWRU5sUVFIanM",
+--   index = 0,
+--   type = "function"
+-- }
+---@class CopilotChat.ToolCall
+---@field ["function"] CopilotChat.ToolCall.Function The function to call
+---@field id string The ID of the tool call
+---@field index number The index of the tool call
+---@field type string The type of the tool call
+
+---@class CopilotChat.ToolCall.Function
+---@field arguments string The marshalled json arguments for the function
+---@field name string The name of the function
+
 ---@class CopilotChat
 ---@field config CopilotChat.config
 ---@field chat CopilotChat.ui.Chat
----@field mcp_client CopilotChat.mcp.Client
+---@field tools CopilotChat.Tool[]|nil
 local M = {}
 
 --- @class CopilotChat.source
@@ -35,6 +101,11 @@ local state = {
   last_response = nil,
   highlights_loaded = false,
 }
+
+---@class CopilotChat.ToolCall
+---@field name string The name of the tool
+---@field description string The description of the tool
+---@field inputSchema table The JSON schema for the tool's input
 
 --- Insert sticky values from config into prompt
 ---@param prompt string
@@ -152,7 +223,7 @@ local function update_highlights()
 
     vim.cmd('syntax match CopilotChatInput ":\\(.\\+\\)" contained containedin=CopilotChatKeyword')
     state.highlights_loaded = true
-  end)
+  end, noop)
 end
 
 --- Finish writing to chat buffer.
@@ -542,7 +613,7 @@ function M.trigger_complete(without_context)
           vim.api.nvim_buf_set_text(bufnr, row - 1, col, row - 1, col, { value_str })
           vim.api.nvim_win_set_cursor(0, { row, col + #value_str })
         end, state.source or {})
-      end)
+      end, noop)
     end
 
     return
@@ -562,7 +633,7 @@ function M.trigger_complete(without_context)
         return vim.startswith(item.word:lower(), prefix:lower())
       end, items)
     )
-  end)
+  end, noop)
 end
 
 --- Get the completion info for the chat window, for use with custom completion providers
@@ -695,7 +766,27 @@ function M.open(config)
 
   M.mcp_client = mcp:new('mcp-local-fs')
   log.debug("starting mcp client")
-  M.mcp_client:start()
+  M.mcp_client:start(function(err, capabilities)
+    log.debug(string.format("mcp client started: err=%s, capabilities=%s", err, vim.inspect(capabilities)))
+    M.mcp_client:list_tools(function(err, mcp_tools)
+      if err or mcp_tools == nil then
+        error(string.format("could not list tools: %s", err))
+      end
+      local tools = {}
+      for _, tool in ipairs(mcp_tools.tools) do
+        table.insert(tools, {
+          type = "function",
+          ["function"] = {
+            name = tool.name,
+            description = tool.description,
+            parameters = tool.inputSchema,
+          },
+        })
+      end
+      log.debug("transformed list_tools=", vim.inspect(tools))
+      M.tools = tools
+    end)
+  end)
 
   M.chat:follow()
   M.chat:focus()
@@ -751,7 +842,7 @@ function M.select_model()
         M.config.model = choice.id
       end
     end)
-  end)
+  end, noop)
 end
 
 --- Select default Copilot agent.
@@ -782,7 +873,7 @@ function M.select_agent()
         M.config.agent = choice.id
       end
     end)
-  end)
+  end, noop)
 end
 
 --- Select a prompt template to use.
@@ -891,7 +982,7 @@ function M.ask(prompt, config)
       return
     end
 
-    local ask_ok, response, references, token_count, token_max_count = pcall(client.ask, client, prompt, {
+    local ask_ok, response, tool_calls, references, token_count, token_max_count = pcall(client.ask, client, prompt, {
       headless = config.headless,
       contexts = contexts,
       selection = selection,
@@ -899,6 +990,7 @@ function M.ask(prompt, config)
       system_prompt = system_prompt,
       model = selected_model,
       agent = selected_agent,
+      tools = M.tools,
       temperature = config.temperature,
       on_progress = vim.schedule_wrap(function(token)
         local out = config.stream and config.stream(token, state.source) or nil
@@ -913,6 +1005,27 @@ function M.ask(prompt, config)
     })
 
     utils.schedule_main()
+
+    local tool_call_results = {}
+    local co = coroutine.create(function()
+      tool_calls = tool_calls or {}
+      for _, tool_call in ipairs(tool_calls) do
+        local func = tool_call["function"]
+        local args = utils.json_decode(func.arguments)
+        if not args then
+          log.error(args)
+          return
+        end
+        local err, result = M.mcp_client:call_tool_sync(func.name, args)
+        if err then
+          log.error(string.format("error calling tool %s: %s", func.name, err))
+          return
+        end
+        log.debug(string.format("tool %s returned: %s", func.name, vim.inspect(result)))
+      end
+    end)
+
+    coroutine.resume(co)
 
     if not ask_ok then
       log.error(response)

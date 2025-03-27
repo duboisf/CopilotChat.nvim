@@ -7,6 +7,7 @@
 ---@field model string
 ---@field agent string?
 ---@field temperature number
+---@field tools CopilotChat.mcp.ToolList
 ---@field on_progress? fun(response: string):nil
 
 ---@class CopilotChat.Client.model : CopilotChat.Provider.model
@@ -421,7 +422,7 @@ end
 --- Ask a question to Copilot
 ---@param prompt string: The prompt to send to Copilot
 ---@param opts CopilotChat.Client.ask: Options for the request
----@return string?, table?, number?, number?
+---@return string?, CopilotChat.ToolCall[], table?, number?, number?
 function Client:ask(prompt, opts)
   opts = opts or {}
 
@@ -439,6 +440,8 @@ function Client:ask(prompt, opts)
   if not model_config then
     error('Model not found: ' .. opts.model)
   end
+
+  log.debug('model config:', vim.inspect(model_config))
 
   local agents = self:fetch_agents()
   local agent_config = opts.agent and agents[opts.agent]
@@ -463,6 +466,7 @@ function Client:ask(prompt, opts)
       id = opts.agent and opts.agent:gsub(':' .. provider_name .. '$', ''),
     }),
     temperature = opts.temperature,
+    tools = opts.tools,
   }
 
   local max_tokens = model_config.max_input_tokens
@@ -572,7 +576,6 @@ function Client:ask(prompt, opts)
       return
     end
 
-    log.debug('Response line:', line)
     if not opts.headless then
       notify.publish(notify.STATUS, '')
     end
@@ -607,7 +610,7 @@ function Client:ask(prompt, opts)
 
     if out.tool_calls then
       for _, tool_call in ipairs(out.tool_calls) do
-        log.debug('Tool call:', vim.inspect(tool_call))
+        log.debug('tool_call:', vim.inspect(tool_call))
         table.insert(tool_calls, tool_call)
       end
     end
@@ -668,7 +671,9 @@ function Client:ask(prompt, opts)
     generate_ask_request(history, opts.contexts, prompt, opts.system_prompt, generated_messages),
     options
   )
-  -- dump(request)
+
+  log.debug('request:', vim.inspect(request))
+
   local is_stream = request.stream
 
   local args = {
@@ -690,9 +695,9 @@ function Client:ask(prompt, opts)
     self.current_job = nil
   end
 
-  log.debug('Response status:', response.status)
-  log.debug('Response body:\n', response.body)
-  log.debug('Response headers:\n', response.headers)
+  -- log.debug('Response status:', response.status)
+  -- log.debug('Response body:\n', response.body)
+  -- log.debug('Response headers:\n', response.headers)
 
   if err then
     local error_msg = 'Failed to get response: ' .. err
@@ -741,7 +746,7 @@ function Client:ask(prompt, opts)
     return
   end
 
-  return response_text, references:values(), last_message and last_message.total_tokens or 0, max_tokens
+  return response_text, tool_calls, references:values(), last_message and last_message.total_tokens or 0, max_tokens
 end
 
 --- List available models

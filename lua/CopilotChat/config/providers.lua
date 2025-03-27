@@ -87,6 +87,7 @@ end
 ---@field model CopilotChat.Provider.model
 ---@field agent CopilotChat.Provider.agent?
 ---@field temperature number?
+---@field tools table
 
 ---@class CopilotChat.Provider.input
 ---@field role string
@@ -96,8 +97,15 @@ end
 ---@field name string
 ---@field url string
 
+---@class CopilotChat.Provider.ToolCall
+---@field tool string
+---@field arguments table
+---@field result table
+---@field error string
+
 ---@class CopilotChat.Provider.output
 ---@field content string
+---@field tool_calls table
 ---@field finish_reason string?
 ---@field total_tokens number?
 ---@field references table<CopilotChat.Provider.reference>?
@@ -241,29 +249,8 @@ M.copilot = {
       out.max_tokens = opts.model.max_output_tokens
     end
 
+    out.tools = opts.tools
 
-    out.tools = {
-      {
-        type = "function",
-        ["function"] = {
-          name = "gh_get_latest_action",
-          description = "get the latest version of a GitHub Action",
-          parameters = {
-            ["$schema"] = "https://json-schema.org/draft/2020-12/schema",
-            properties = {
-              name = {
-                description = "The name of the GitHub Action",
-                type = "string"
-              }
-            },
-            required = { "name" },
-            type = "object"
-          }
-        }
-      }
-    }
-
-    dump(out)
     return out
   end,
 
@@ -297,7 +284,6 @@ M.copilot = {
 
     local finish_reason = message.finish_reason or message.done_reason or output.finish_reason or output.done_reason
 
-    dump(tool_calls)
     return {
       content = content,
       tool_calls = tool_calls,

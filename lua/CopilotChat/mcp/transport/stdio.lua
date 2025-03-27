@@ -95,11 +95,35 @@ function M:request(method, params, callback)
 
   self.pending_requests[id] = callback
 
-  local message = utils.json_encode(request) .. "\n"
+  log.debug('stdio:request: message=', vim.inspect(request))
+  local message = vim.json.encode(request) .. "\n"
+  log.debug('stdio:request: message=', message)
+
   local bytes_written = vim.fn.chansend(self.job_id, message)
   if bytes_written == 0 then
     error('failed to send request to mcp server')
   end
+end
+
+---Sends a synchronous request to the MCP server.
+---@param method string The method to call.
+---@param params table The parameters to pass to the method.
+---@return string|table|nil, table|nil
+function M:request_sync(endpoint, payload)
+  local co = coroutine.running()
+  if not co then
+    error("request_sync must be called within a coroutine")
+  end
+
+  local callback_err, callback_result
+  self:request(endpoint, payload, function(err, result)
+    callback_err = err
+    callback_result = result
+    coroutine.resume(co)
+  end)
+
+  coroutine.yield()
+  return callback_err, callback_result
 end
 
 ---Sends a notification to the MCP server.
@@ -123,6 +147,12 @@ function M:on_notification(method, handler)
   self.notification_handlers[method] = handler
 end
 
+---@class CopilotChat.mpc.transport.JSONRPCResponse
+---@field jsonrpc string The JSON-RPC version.
+---@field id number The ID of the request.
+---@field result any The result of the request.
+---@field error any The error of the request.
+
 ---Handles a message received from the MCP server.
 ---@param message table The message received from the server.
 function M:handle_message(message)
@@ -145,11 +175,6 @@ function M:handle_message(message)
       log.warn("Received notification for unknown method: " .. message.method)
     end
   end
-end
-
----@param tbl table
-function utils.json_encode(tbl)
-  return vim.json.encode(tbl)
 end
 
 return M
