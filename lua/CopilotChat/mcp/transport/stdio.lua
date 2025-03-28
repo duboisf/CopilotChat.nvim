@@ -19,7 +19,7 @@ local dlog = require('plenary.log').new(
 local utils = require("CopilotChat.utils")
 local log = require("plenary.log")
 
----@class CopilotChat.mcp.transport.Stdio
+---@class MCP.Transport.Stdio
 ---@field command string The command to execute for the MCP server.
 ---@field job_id number|nil The ID of the job associated with the MCP client.
 ---@field next_id number The next request ID to use.
@@ -29,7 +29,7 @@ local M = {}
 
 ---Creates a new MCPClient instance.
 ---@param command string The command to execute for the MCP server.
----@return CopilotChat.mcp.transport.Stdio
+---@return MCP.Transport.Stdio
 function M:new(command)
   local self = setmetatable({}, { __index = M })
   self.command = command
@@ -167,39 +167,55 @@ end
 
 ---@alias JsonRPCVersion "2.0"
 
----@class Transport.Response
+---@class MCP.Transport.Response
 ---@field jsonrpc JsonRPCVersion The JSON-RPC version.
 ---@field id number The ID of the request.
 ---@field result? { [string]: any } The result of the request.
 ---@field error? {code: any, message: string, data?: any} The error of the request.
 
----@class Transport.Notification
+---@alias Stdio MCP.Transport.Stdio
+
+---@class MCP.Transport.Notification
 ---@field jsonrpc JsonRPCVersion
 ---@field method string
 ---@field params { [string]: any } The result of the request.
 
----Handles a message received from the MCP server.
----@param message Transport.Response|Transport.Notification The message received from the server.
-function M:handle_message(message)
-  dlog.debug('mpc msg', message)
-  if message.id then
-    ---@cast message -Transport.Notification
-    -- Handle response
-    local callback = self.pending_requests[message.id]
-    if callback then
-      self.pending_requests[message.id] = nil
-      callback(message.error, message.result)
-    else
-      log.warn("Received response for unknown request ID: " .. message.id)
-    end
+---Handle response from server
+---@param self Stdio
+---@param resp MCP.Transport.Response
+local function handle_response(self, resp)
+  local callback = self.pending_requests[resp.id]
+  if callback then
+    self.pending_requests[resp.id] = nil
+    callback(resp.error, resp.result)
   else
-    ---@cast message -Transport.Response
-    local handler = self.notification_handlers[message.method]
-    if handler then
-      handler(message.params)
-    else
-      log.warn("Received notification for unknown method: " .. message.method)
-    end
+    log.warn("Received response for unknown request ID: " .. resp.id)
+  end
+end
+
+
+---Handle notification from server
+---@param self Stdio
+---@param notification MCP.Transport.Notification
+local function handle_notification(self, notification)
+  local handler = self.notification_handlers[notification.method]
+  if handler then
+    handler(notification.params)
+  else
+    log.warn("Received notification for unknown method: " .. notification.method)
+  end
+end
+
+---Handles a message received from the MCP server.
+---@param message MCP.Transport.Response|MCP.Transport.Notification The message received from the server.
+function M:handle_message(message)
+  dlog.debug('Received message from MCP server:', message)
+  if message.id then
+    ---@cast message MCP.Transport.Response
+    handle_response(self, message)
+  else
+    ---@cast message MCP.Transport.Notification
+    handle_notification(self, message)
   end
 end
 
