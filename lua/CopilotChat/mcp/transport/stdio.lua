@@ -1,3 +1,20 @@
+local dlog = require('plenary.log').new(
+  {
+    fmt_msg = function(is_console, mode_name, src_path, src_line, msg)
+      local nameupper = mode_name:upper()
+      local lineinfo = string.format("%s:%d", src_path:match("([^/]+)$"), src_line)
+      if is_console then
+        return string.format("[%-6s%s] %s: %s", nameupper, os.date "%H:%M:%S", lineinfo, msg)
+      else
+        return string.format("[%-6s%s] %s: %s\n", nameupper, os.date(), lineinfo, msg)
+      end
+    end,
+    plugin = "copilot-debug",
+    level = "debug",
+    outfile = "/tmp/copilot-mcp-debug-logs.txt"
+  }, false
+)
+
 ---@diagnostic disable: missing-fields
 local utils = require("CopilotChat.utils")
 local log = require("plenary.log")
@@ -6,7 +23,7 @@ local log = require("plenary.log")
 ---@field command string The command to execute for the MCP server.
 ---@field job_id number|nil The ID of the job associated with the MCP client.
 ---@field next_id number The next request ID to use.
----@field pending_requests table<number, any> A table of pending requests indexed by ID.
+---@field pending_requests table<number, fun(...: any): any> A table of pending requests indexed by ID.
 ---@field notification_handlers table<string, function> A table of notification handlers indexed by event name.
 local M = {}
 
@@ -82,7 +99,7 @@ end
 ---Sends a request to the MCP server.
 ---@param method string The method to call.
 ---@param params table The parameters to pass to the method.
----@param callback function The callback function to call when the response is received.
+---@param callback fun(...: any): any The callback function to call when the response is received.
 function M:request(method, params, callback)
   local id = self.next_id
   self.next_id = self.next_id + 1
@@ -148,17 +165,25 @@ function M:on_notification(method, handler)
   self.notification_handlers[method] = handler
 end
 
----@class CopilotChat.mpc.transport.JSONRPCResponse
----@field jsonrpc string The JSON-RPC version.
+---@alias JsonRPCVersion "2.0"
+
+---@class Transport.Response
+---@field jsonrpc JsonRPCVersion The JSON-RPC version.
 ---@field id number The ID of the request.
----@field result any The result of the request.
----@field error any The error of the request.
+---@field result? { [string]: any } The result of the request.
+---@field error? {code: any, message: string, data?: any} The error of the request.
+
+---@class Transport.Notification
+---@field jsonrpc JsonRPCVersion
+---@field method string
+---@field params { [string]: any } The result of the request.
 
 ---Handles a message received from the MCP server.
----@param message table The message received from the server.
+---@param message Transport.Response|Transport.Notification The message received from the server.
 function M:handle_message(message)
-  log.debug('mpc msg\n', message)
+  dlog.debug('mpc msg', message)
   if message.id then
+    ---@cast message -Transport.Notification
     -- Handle response
     local callback = self.pending_requests[message.id]
     if callback then
@@ -168,7 +193,7 @@ function M:handle_message(message)
       log.warn("Received response for unknown request ID: " .. message.id)
     end
   else
-    -- Handle notification
+    ---@cast message -Transport.Response
     local handler = self.notification_handlers[message.method]
     if handler then
       handler(message.params)

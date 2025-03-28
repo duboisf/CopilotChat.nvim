@@ -94,10 +94,14 @@ function M:list_tools(callback)
   self.transport:request("tools/list", nil, callback)
 end
 
+---@class CopilotChat.mcp.ToolResult
+---@field err any|nil Error message or nil if successful
+---@field result any|nil Result of the tool
+
 ---Call a tool on the server.
 ---@param name string Tool name
 ---@param arguments table Arguments for the tool
----@param callback function Callback function with (error, result)
+---@param callback fun(err?: , foo) Callback function with (error, result)
 function M:call_tool(name, arguments, callback)
   if not self.initialized then
     callback("MCP client not initialized", nil)
@@ -109,10 +113,6 @@ function M:call_tool(name, arguments, callback)
     arguments = arguments or {}
   }, callback)
 end
-
----@class CopilotChat.mcp.ToolResult
----@field err any|nil Error message or nil if successful
----@field result any|nil Result of the tool
 
 --- Call a tool on the server synchronously.
 --- This function must be called within a coroutine.

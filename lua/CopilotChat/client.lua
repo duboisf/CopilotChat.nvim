@@ -207,7 +207,8 @@ end
 --- @param prompt string
 --- @param system_prompt string
 --- @param generated_messages table<CopilotChat.Provider.input>
-local function generate_ask_request(history, contexts, prompt, system_prompt, generated_messages)
+--- @param tool_response boolean If we are sending back tool responses
+local function generate_ask_request(history, contexts, prompt, system_prompt, generated_messages, tool_response)
   local messages = {}
 
   system_prompt = vim.trim(system_prompt)
@@ -271,25 +272,29 @@ Available context providers and their usage:]]
     table.insert(messages, message)
   end
 
-  -- Include context references
-  prompt = vim.trim(prompt)
-  if not vim.tbl_isempty(context_references) then
-    if prompt ~= '' then
-      prompt = '\n\n' .. prompt
+  -- Don't include user prompt if we are sending back tool responses
+  if not tool_response then
+    -- Include context references
+    prompt = vim.trim(prompt)
+    if not vim.tbl_isempty(context_references) then
+      if prompt ~= '' then
+        prompt = '\n\n' .. prompt
+      end
+      prompt = table.concat(vim.tbl_keys(context_references), '\n') .. prompt
     end
-    prompt = table.concat(vim.tbl_keys(context_references), '\n') .. prompt
+
+    -- Include user prompt
+    if not utils.empty(prompt) then
+      table.insert(messages, {
+        content = prompt,
+        role = 'user',
+      })
+    end
+
+    log.debug('System prompt:\n', system_prompt)
+    log.debug('Prompt:\n', prompt)
   end
 
-  -- Include user prompt
-  if not utils.empty(prompt) then
-    table.insert(messages, {
-      content = prompt,
-      role = 'user',
-    })
-  end
-
-  log.debug('System prompt:\n', system_prompt)
-  log.debug('Prompt:\n', prompt)
   return messages
 end
 
@@ -880,6 +885,18 @@ function Client:embed(inputs, model)
   end
 
   return results
+end
+
+--- Check if the last message in the history is tool responses.
+--- We need to send them back to the server.
+--- @return boolean
+function Client:has_tool_responses()
+  if #self.history == 0 then
+    return false
+  end
+
+  local last_message = self.history[#self.history]
+  return last_message.tool_calls ~= nil and #last_message.tool_calls > 0
 end
 
 --- Stop the running job

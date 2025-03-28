@@ -198,6 +198,7 @@ end
 local function handle_tool_calls(tool_calls)
   --- @type CopilotChat.ToolMessage[]
   local tool_call_results = {}
+  dlog.debug('handle_tool_calls: tool_calls =', tool_calls)
   local co = coroutine.create(function()
     tool_calls = tool_calls or {}
     for _, tool_call in ipairs(tool_calls) do
@@ -210,13 +211,13 @@ local function handle_tool_calls(tool_calls)
 
       local err, result = M.mcp_client:call_tool_sync(func.name, args)
 
-      log.debug(string.format("tool %s returned: err=%s, result=%s", func.name, vim.inspect(err), vim.inspect(result)))
+      dlog.debug(string.format("tool %s returned: err=%s, result=%s", func.name, vim.inspect(err), vim.inspect(result)))
 
       if err or result == nil then
-        log.error(string.format("error calling tool %s: %s", func.name, err))
+        dlog.error(string.format("error calling tool %s: %s", func.name, err))
         return
       end
-      log.debug(string.format("tool %s returned: %s", func.name, vim.inspect(result)))
+      dlog.debug(string.format("tool %s returned: %s", func.name, vim.inspect(result)))
       for _, content in ipairs(result.content) do
         table.insert(tool_call_results, {
           content = content.text,
@@ -1013,7 +1014,7 @@ function M.ask(prompt, config)
   -- Retrieve the selection
   local selection = M.get_selection()
 
-  local ok, err = pcall(async.run, function()
+  local client_ask = function()
     local selected_agent, prompt = M.resolve_agent(prompt, config)
     local selected_model, prompt = M.resolve_model(prompt, config)
     local embeddings, prompt = M.resolve_context(prompt, config)
@@ -1030,113 +1031,121 @@ function M.ask(prompt, config)
       return
     end
 
-    local ask_ok, response, tool_calls, references, token_count, token_max_count = pcall(client.ask, client, prompt, {
-      headless = config.headless,
-      contexts = contexts,
-      selection = selection,
-      embeddings = filtered_embeddings,
-      system_prompt = system_prompt,
-      model = selected_model,
-      agent = selected_agent,
-      tools = M.tools,
-      temperature = config.temperature,
-      on_progress = vim.schedule_wrap(function(token)
-        local out = config.stream and config.stream(token, state.source) or nil
-        if out == nil then
-          out = token
-        end
-        local to_print = not config.headless and out
-        if to_print and to_print ~= '' then
-          M.chat:append(token)
-        end
-      end),
-      on_tool_call = vim.schedule_wrap(function(tool_call)
-        ---@type CopilotChat.ToolCall
-        tool_call = tool_call
-        local func = tool_call["function"]
-        if not config.headless then
-          local args = func.arguments
-          if #args > 100 then
-            args = string.sub(args, 1, 96) .. '...}'
+    repeat
+      local ask_ok, response, tool_calls, references, token_count, token_max_count = pcall(client.ask, client, prompt, {
+        headless = config.headless,
+        contexts = contexts,
+        selection = selection,
+        embeddings = filtered_embeddings,
+        system_prompt = system_prompt,
+        model = selected_model,
+        agent = selected_agent,
+        tools = M.tools,
+        temperature = config.temperature,
+        on_progress = vim.schedule_wrap(function(token)
+          local out = config.stream and config.stream(token, state.source) or nil
+          if out == nil then
+            out = token
           end
-          M.chat:append(string.format("🛠️ Want to use %s with args %s", func.name, args))
-        end
-      end),
-    })
-
-    utils.schedule_main()
-
-    local tool_call_results = handle_tool_calls(tool_calls)
-
-    if not ask_ok then
-      log.error(response)
-      if not config.headless then
-        show_error(response)
-      end
-      return
-    end
-
-    -- If there was no error and no response, it means job was cancelled
-    if response == nil and not tool_call_results then
-      dlog.debug('no response and not tool call results, returning early')
-      return
-    end
-
-    -- Call the callback function and store to history
-    local out = config.callback and config.callback(response, state.source) or nil
-    if out == nil then
-      out = response
-    end
-
-    local to_store = not config.headless
-    dlog.debug('to_store=', to_store)
-    if to_store then
-      -- store user prompt to history
-      table.insert(client.history, {
-        content = prompt,
-        role = 'user',
+          local to_print = not config.headless and out
+          if to_print and to_print ~= '' then
+            M.chat:append(token)
+          end
+        end),
+        on_tool_call = vim.schedule_wrap(function(tool_call)
+          ---@type CopilotChat.ToolCall
+          tool_call = tool_call
+          local func = tool_call["function"]
+          if not config.headless then
+            local args = func.arguments
+            if #args > 100 then
+              args = string.sub(args, 1, 96) .. '...}'
+            end
+            M.chat:append(string.format("🛠️ Call %s with args %s", func.name, args))
+          end
+        end),
       })
-      -- store tool calls to history
-      if tool_calls then
-        for _, tool_call in ipairs(tool_calls) do
+
+      utils.schedule_main()
+
+      local tool_call_results = handle_tool_calls(tool_calls)
+
+      if not ask_ok then
+        log.error(response)
+        if not config.headless then
+          show_error(response)
+        end
+        return
+      end
+
+      -- If there was no error and no response, it means job was cancelled
+      if response == nil and not tool_call_results then
+        dlog.debug('no response and not tool call results, returning early')
+        return
+      end
+
+      -- Call the callback function and store to history
+      local out = config.callback and config.callback(response, state.source) or nil
+      if out == nil then
+        out = response
+      end
+
+      local to_store = not config.headless
+      dlog.debug('to_store=', to_store)
+      if to_store then
+        -- store user prompt to history
+        table.insert(client.history, {
+          content = prompt,
+          role = 'user',
+        })
+        -- store tool calls to history
+        if tool_calls then
+          for _, tool_call in ipairs(tool_calls) do
+            table.insert(client.history, {
+              content = tool_call,
+              role = 'tool',
+            })
+          end
+        end
+        -- store tool call responses to history
+        dlog.debug('tool_call_results:', tool_call_results)
+        if tool_call_results then
+          for _, tool_call_result in ipairs(tool_call_results) do
+            table.insert(client.history, tool_call_result)
+          end
+        end
+        -- store assistant response to history
+        if out and out ~= '' then
           table.insert(client.history, {
-            content = tool_call,
-            role = 'tool',
+            content = out,
+            role = 'assistant',
           })
         end
+        dlog.debug('client.history=', client.history)
       end
-      -- store tool call responses to history
-      if tool_call_results then
-        for _, tool_call_result in ipairs(tool_call_results) do
-          table.insert(client.history, tool_call_result)
+
+      if not client:has_tool_responses() and not config.headless then
+        state.last_response = response
+        M.chat.references = references
+        M.chat.token_count = token_count
+        M.chat.token_max_count = token_max_count
+
+        if not utils.empty(references) and config.references_display == 'write' then
+          M.chat:append('\n\n**`References`**:')
+          for _, ref in ipairs(references) do
+            M.chat:append(string.format('\n[%s](%s)', ref.name, ref.url))
+          end
         end
-      end
-      -- store assistant response to history
-      if out and out ~= '' then
-        table.insert(client.history, {
-          content = out,
-          role = 'assistant',
-        })
-      end
-      dlog.debug('client.history=', client.history)
-    end
 
-    if not config.headless then
-      state.last_response = response
-      M.chat.references = references
-      M.chat.token_count = token_count
-      M.chat.token_max_count = token_max_count
-
-      if not utils.empty(references) and config.references_display == 'write' then
-        M.chat:append('\n\n**`References`**:')
-        for _, ref in ipairs(references) do
-          M.chat:append(string.format('\n[%s](%s)', ref.name, ref.url))
-        end
+        finish()
       end
+      dlog.debug("about to repeat client_ask, has_tool_responses:", client:has_tool_responses())
+    until not client:has_tool_responses()
+  end
 
-      finish()
-    end
-  end)
+  dlog.debug('about to async run')
+  local ok, err = pcall(async.run, client_ask)
+  dlog.debug('done with async run, ok:', ok, 'err:', err)
 
   if not ok then
     log.error(err)
