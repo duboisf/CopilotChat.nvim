@@ -363,7 +363,9 @@ end
 --- Fetch models from the Copilot API
 ---@return table<string, CopilotChat.Client.model>
 function Client:fetch_models()
+  dlog.debug('fetch_models')
   if self.models then
+    dlog.debug('early return models')
     return self.models
   end
 
@@ -371,6 +373,7 @@ function Client:fetch_models()
   local provider_order = vim.tbl_keys(self.providers)
   table.sort(provider_order)
   for _, provider_name in ipairs(provider_order) do
+    dlog.debug('fetch_models provider name:', provider_name)
     local provider = self.providers[provider_name]
     if not provider.disabled and provider.get_models then
       notify.publish(notify.STATUS, 'Fetching models from ' .. provider_name)
@@ -379,11 +382,13 @@ function Client:fetch_models()
         log.warn('Failed to authenticate with ' .. provider_name .. ': ' .. headers)
         goto continue
       end
+      dlog.debug('authenticated with provider:', provider_name)
       local ok, provider_models = pcall(provider.get_models, headers)
       if not ok then
         log.warn('Failed to fetch models from ' .. provider_name .. ': ' .. provider_models)
         goto continue
       end
+      dlog.debug('got models from provider:', provider_name)
 
       for _, model in ipairs(provider_models) do
         model.provider = provider_name
@@ -393,11 +398,11 @@ function Client:fetch_models()
         models[model.id] = model
       end
 
+      dlog.debug('done with models from provider:', provider_name)
       ::continue::
     end
   end
 
-  log.debug('Fetched models:', vim.inspect(models))
   self.models = models
   return self.models
 end
@@ -405,6 +410,7 @@ end
 --- Fetch agents from the Copilot API
 ---@return table<string, CopilotChat.Client.agent>
 function Client:fetch_agents()
+  dlog.debug('fetch_agents')
   if self.agents then
     return self.agents
   end
@@ -469,6 +475,7 @@ function Client:ask(prompt, opts)
   log.debug('model config:', vim.inspect(model_config))
 
   local agents = self:fetch_agents()
+  dlog.debug('fetch_agents')
   local agent_config = opts.agent and agents[opts.agent]
   if opts.agent and not agent_config then
     error('Agent not found: ' .. opts.agent)

@@ -2,6 +2,24 @@ local utils = require('CopilotChat.utils')
 
 local EDITOR_VERSION = 'Neovim/' .. vim.version().major .. '.' .. vim.version().minor .. '.' .. vim.version().patch
 
+local dlog = require('plenary.log').new(
+  {
+    fmt_msg = function(is_console, mode_name, src_path, src_line, msg)
+      local nameupper = mode_name:upper()
+      local lineinfo = string.format("%s:%d", src_path:match("([^/]+)$"), src_line)
+      if is_console then
+        return string.format("[%-6s%s] %s: %s", nameupper, os.date "%H:%M:%S", lineinfo, msg)
+      else
+        return string.format("[%-6s%s] %s: %s\n", nameupper, os.date(), lineinfo, msg)
+      end
+    end,
+    level = "debug",
+    plugin = "copilot-debug",
+    outfile = "/tmp/copilot-mcp-debug-logs.txt",
+    use_console = false,
+  }, false
+)
+
 local cached_github_token = nil
 
 local function config_path()
@@ -126,34 +144,66 @@ local M = {}
 M.copilot = {
   embed = 'copilot_embeddings',
 
+  ---@async
   get_headers = function()
-    local response, err = utils.curl_get('https://api.github.com/copilot_internal/v2/token', {
-      json_response = true,
-      headers = {
-        ['Authorization'] = 'Token ' .. get_github_token(),
-      },
-    })
+    local thread = coroutine.running()
+    if not thread then
+      error('get_headers must be called from a coroutine')
+    end
 
-    print('curl response', vim.inspect(response))
+    local err = nil
+    local resp = nil
+    utils.curl_get('https://api.github.com/copilot_internal/v2/token', {
+        json_response = true,
+        headers = {
+          ['Authorization'] = 'Token ' .. get_github_token(),
+        },
+      },
+      function(response, error)
+        resp = response
+        err = error
+        coroutine.resume(thread)
+      end
+    )
+
+    coroutine.yield()
+
     if err then
       error(err)
     end
 
     return {
-          ['Authorization'] = 'Bearer ' .. response.body.token,
+          ['Authorization'] = 'Bearer ' .. resp.body.token,
           ['Editor-Version'] = EDITOR_VERSION,
           ['Editor-Plugin-Version'] = 'CopilotChat.nvim/*',
           ['Copilot-Integration-Id'] = 'vscode-chat',
         },
-        response.body.expires_at
+        resp.body.expires_at
   end,
 
+  ---@async
   get_agents = function(headers)
-    local response, err = utils.curl_get('https://api.githubcopilot.com/agents', {
-      json_response = true,
-      headers = headers,
-    })
+    local thread = coroutine.running()
+    if not thread then
+      error('get_agents must be called from a coroutine')
+    end
 
+    local resp = nil
+    local err = nil
+    utils.curl_get('https://api.githubcopilot.com/agents', {
+        json_response = true,
+        headers = headers,
+      },
+      function(response, error)
+        resp = response
+        err = error
+        coroutine.resume(thread)
+      end
+    )
+
+    coroutine.yield()
+
+    dlog.debug('get_agents response')
     if err then
       error(err)
     end
@@ -164,21 +214,36 @@ M.copilot = {
         name = agent.name,
         description = agent.description,
       }
-    end, response.body.agents)
+    end, resp.body.agents)
   end,
 
+  ---@async
   get_models = function(headers)
-    local response, err = utils.curl_get('https://api.githubcopilot.com/models', {
+    local thread = coroutine.running()
+    if not thread then
+      error('get_models must be called from a coroutine')
+    end
+
+    local resp = nil
+    local err = nil
+    utils.curl_get('https://api.githubcopilot.com/models', {
       json_response = true,
       headers = headers,
-    })
+    }, function(response, error)
+      err = error
+      resp = response
+      coroutine.resume(thread)
+    end)
 
+    coroutine.yield()
+
+    dlog.debug('get_models response')
     if err then
       error(err)
     end
 
     local models = vim
-        .iter(response.body.data)
+        .iter(resp.body.data)
         :filter(function(model)
           return model.capabilities.type == 'chat'
         end)
@@ -210,6 +275,7 @@ M.copilot = {
 
     for _, model in ipairs(models) do
       if not model.policy then
+        dlog.debug('policy not enabled for model', model.id)
         utils.curl_post('https://api.githubcopilot.com/models/' .. model.id .. '/policy', {
           headers = headers,
           json_request = true,
@@ -218,6 +284,7 @@ M.copilot = {
       end
     end
 
+    dlog.debug('get_models return')
     return models
   end,
 
@@ -314,8 +381,14 @@ M.github_models = {
     }
   end,
 
+  ---@async
   get_models = function(headers)
-    local response, err = utils.curl_post('https://api.catalog.azureml.ms/asset-gallery/v1.0/models', {
+    local thread = coroutine.running()
+    if not thread then
+      error('github_models.get_models must be called from a coroutine')
+    end
+    local resp, err = nil, nil
+    utils.curl_post('https://api.catalog.azureml.ms/asset-gallery/v1.0/models', {
       headers = headers,
       json_request = true,
       json_response = true,
@@ -328,14 +401,20 @@ M.github_models = {
           { field = 'displayName', direction = 'asc' },
         },
       },
-    })
+    }, function(response, error)
+      resp = response
+      err = error
+      coroutine.resume(thread)
+    end)
+
+    coroutine.yield()
 
     if err then
       error(err)
     end
 
     return vim
-        .iter(response.body.summaries)
+        .iter(resp.body.summaries)
         :filter(function(model)
           return vim.tbl_contains(model.inferenceTasks, 'chat-completion')
         end)
@@ -362,8 +441,14 @@ M.github_models = {
 M.copilot_embeddings = {
   get_headers = M.copilot.get_headers,
 
+  ---@async
   embed = function(inputs, headers)
-    local response, err = utils.curl_post('https://api.githubcopilot.com/embeddings', {
+    local thread = coroutine.running()
+    if not thread then
+      error('copilot_embeddings.embed must be called from a coroutine')
+    end
+    local resp, err = nil, nil
+    utils.curl_post('https://api.githubcopilot.com/embeddings', {
       headers = headers,
       json_request = true,
       json_response = true,
@@ -372,13 +457,19 @@ M.copilot_embeddings = {
         input = inputs,
         model = 'text-embedding-3-small',
       },
-    })
+    }, function(response, error)
+      resp = response
+      err = error
+      coroutine.resume(thread)
+    end)
+
+    coroutine.yield()
 
     if err then
       error(err)
     end
 
-    return response.body.data
+    return resp.body.data
   end,
 }
 

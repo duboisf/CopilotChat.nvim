@@ -1,6 +1,24 @@
 local async = require('plenary.async')
 local curl = require('plenary.curl')
 local scandir = require('plenary.scandir')
+local dlog = require('plenary.log').new(
+  {
+    fmt_msg = function(is_console, mode_name, src_path, src_line, msg)
+      local nameupper = mode_name:upper()
+      local lineinfo = string.format("%s:%d", src_path:match("([^/]+)$"), src_line)
+      if is_console then
+        return string.format("[%-6s%s] %s: %s", nameupper, os.date "%H:%M:%S", lineinfo, msg)
+      else
+        return string.format("[%-6s%s] %s: %s\n", nameupper, os.date(), lineinfo, msg)
+      end
+    end,
+    level = "debug",
+    plugin = "copilot-debug",
+    outfile = "/tmp/copilot-mcp-debug-logs.txt",
+    use_console = false,
+  }, false
+)
+
 
 local M = {}
 M.timers = {}
@@ -432,8 +450,7 @@ end
 --- Send curl get request
 ---@param url string The url
 ---@param opts table? The options
----@async
-M.curl_get = async.wrap(function(url, opts, callback)
+function M.curl_get(url, opts, callback)
   local args = {
     on_error = function(err)
       callback(nil, err and err.stderr or err)
@@ -464,7 +481,7 @@ M.curl_get = async.wrap(function(url, opts, callback)
   end
 
   curl.get(url, args)
-end, 3)
+end
 
 --- Send curl post request
 ---@param url string The url
@@ -616,24 +633,21 @@ end
 
 --- Read a file
 ---@param path string The file path
----@async
+---@return string|nil
 function M.read_file(path)
-  local err, fd = async.uv.fs_open(path, 'r', 438)
-  if err or not fd then
+  local fd = vim.uv.fs_open(path, 'r', 438)
+  if not fd then
     return nil
   end
 
-  local err, stat = async.uv.fs_fstat(fd)
-  if err or not stat then
-    async.uv.fs_close(fd)
+  local stat = vim.uv.fs_fstat(fd)
+  if not stat then
+    vim.uv.fs_close(fd)
     return nil
   end
 
-  local err, data = async.uv.fs_read(fd, stat.size, 0)
-  async.uv.fs_close(fd)
-  if err or not data then
-    return nil
-  end
+  local data = vim.uv.fs_read(fd, stat.size, 0)
+  vim.uv.fs_close(fd)
   return data
 end
 

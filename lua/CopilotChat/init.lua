@@ -234,7 +234,7 @@ end
 
 --- Update the highlights for chat buffer
 local function update_highlights()
-  print('update_highlights')
+  dlog.debug('update_highlights')
   local selection_ns = vim.api.nvim_create_namespace('copilot-chat-selection')
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     vim.api.nvim_buf_clear_namespace(buf, selection_ns, 0, -1)
@@ -666,21 +666,22 @@ function M.trigger_complete(without_context)
     return
   end
 
-  async.run(function()
-    local items = M.complete_items()
-    utils.schedule_main()
+  -- local thread = coroutine.running()
+  -- if not thread then
+  --   error('Cannot run completion outside of coroutine')
+  -- end
+  local items = M.complete_items()
 
-    if vim.fn.mode() ~= 'i' then
-      return
-    end
+  if vim.fn.mode() ~= 'i' then
+    return
+  end
 
-    vim.fn.complete(
-      cmp_start + 1,
-      vim.tbl_filter(function(item)
-        return vim.startswith(item.word:lower(), prefix:lower())
-      end, items)
-    )
-  end, noop)
+  vim.fn.complete(
+    cmp_start + 1,
+    vim.tbl_filter(function(item)
+      return vim.startswith(item.word:lower(), prefix:lower())
+    end, items)
+  )
 end
 
 --- Get the completion info for the chat window, for use with custom completion providers
@@ -1340,7 +1341,13 @@ function M.setup(config)
             update_source()
           end
 
-          vim.schedule(update_highlights)
+          coroutine.wrap(function()
+            dlog.debug(debug.traceback("START update_highlights, fetching agents and models"))
+            dlog.debug("START update_highlights, fetching agents and models")
+            update_highlights()
+            dlog.debug("done update_highlights")
+            dlog.debug("DONE update_highlights, fetching agents and models")
+          end)()
         end,
       })
 
