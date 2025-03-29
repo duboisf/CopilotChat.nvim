@@ -7,7 +7,7 @@
 ---@field model string
 ---@field agent string?
 ---@field temperature number
----@field tools CopilotChat.mcp.ToolList
+---@field tools MCP.Tool[]
 ---@field on_progress? fun(response: string):nil
 ---@field on_tool_call? fun(tool_call: CopilotChat.ToolCall):nil
 
@@ -19,7 +19,19 @@
 
 local dlog = require('plenary.log').new(
   {
-    plugin = "copilot-debug", level = "debug", outfile = "/tmp/copilot-debug-logs.txt"
+    fmt_msg = function(is_console, mode_name, src_path, src_line, msg)
+      local nameupper = mode_name:upper()
+      local lineinfo = string.format("%s:%d", src_path:match("([^/]+)$"), src_line)
+      if is_console then
+        return string.format("[%-6s%s] %s: %s", nameupper, os.date "%H:%M:%S", lineinfo, msg)
+      else
+        return string.format("[%-6s%s] %s: %s\n", nameupper, os.date(), lineinfo, msg)
+      end
+    end,
+    level = "debug",
+    plugin = "copilot-debug",
+    outfile = "/tmp/copilot-mcp-debug-logs.txt",
+    use_console = false,
   }, false
 )
 
@@ -436,6 +448,7 @@ end
 ---@param opts CopilotChat.Client.ask: Options for the request
 ---@return string?, CopilotChat.ToolCall[], table?, number?, number?
 function Client:ask(prompt, opts)
+  print('ask')
   opts = opts or {}
 
   if opts.agent == 'none' or opts.agent == 'copilot' then
@@ -584,7 +597,6 @@ function Client:ask(prompt, opts)
   end
 
   local function parse_line(line, job)
-    dlog.debug('parse_line: line=', line)
     if not line or line == '' then
       return
     end
@@ -648,9 +660,6 @@ function Client:ask(prompt, opts)
     end
 
     line = line:gsub('^data:%s*', '')
-    if line:find("tool_call") then
-      dlog.debug('parse_stream_line: tool_call', line)
-    end
     if line == '[DONE]' then
       finish_stream(nil, job)
       return
@@ -690,7 +699,7 @@ function Client:ask(prompt, opts)
 
   local tmp_request = vim.tbl_deep_extend('force', {}, request)
   tmp_request.tools = nil
-  dlog.debug('request:', tmp_request)
+  log.debug('request:', tmp_request)
 
   local is_stream = request.stream
 
@@ -748,7 +757,6 @@ function Client:ask(prompt, opts)
   end
 
   if is_stream then
-    dlog.debug('got full response, response_text=', response_text)
     if utils.empty(response_text) and #tool_calls == 0 then
       for _, line in ipairs(vim.split(response.body, '\n')) do
         parse_stream_line(line)
@@ -769,6 +777,7 @@ end
 --- List available models
 ---@return table<string, table>
 function Client:list_models()
+  print('list_models')
   local models = self:fetch_models()
   local result = vim.tbl_keys(models)
 
@@ -813,6 +822,7 @@ end
 ---@param model string
 ---@return table<CopilotChat.context.embed>
 function Client:embed(inputs, model)
+  print('embed')
   if not inputs or #inputs == 0 then
     return inputs
   end

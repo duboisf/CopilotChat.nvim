@@ -1,24 +1,60 @@
 ---@diagnostic disable-next-line: undefined-global
 local vim = vim
 local log = require("plenary.log")
+local dlog = require('plenary.log').new(
+  {
+    fmt_msg = function(is_console, mode_name, src_path, src_line, msg)
+      local nameupper = mode_name:upper()
+      local lineinfo = string.format("%s:%d", src_path:match("([^/]+)$"), src_line)
+      if is_console then
+        return string.format("[%-6s%s] %s: %s", nameupper, os.date "%H:%M:%S", lineinfo, msg)
+      else
+        return string.format("[%-6s%s] %s: %s\n", nameupper, os.date(), lineinfo, msg)
+      end
+    end,
+    level = "debug",
+    plugin = "copilot-debug",
+    outfile = "/tmp/copilot-mcp-debug-logs.txt",
+    use_console = false,
+  }, false
+)
+
 local stdio = require("CopilotChat.mcp.transport.stdio")
 
----@class CopilotChat.mcp.Client
+---@class MCP.Tool A tool that can be called
+---@field name string The name of the tool
+---@field description string A description of the tool
+---@field inputSchema table The JSON schema for the tool's input
+
+---@class MCP.ToolResult
+---@field err any|nil Error message or nil if successful
+---@field result any|nil Result of the tool
+
+---@class MCP.Client
 ---@field initialized boolean Whether the client has been initialized
----@field transport CopilotChat.mcp.transport.Stdio The transport layer used to communicate with the server
+---@field transport MCP.Transport.Stdio The transport layer used to communicate with the server
 ---@field capabilities table Client capabilities
 ---@field server_capabilities table Server capabilities
 ---@field server_info table Server information
 ---@field protocol_version string Protocol version used
 local M = {}
 
+---@async
 ---Creates a new MCP client.
----@param command string Command to use for the MCP server, or a server ID
----@return CopilotChat.mcp.Client
+---@param command string[] Command to use for the MCP server, or a server ID
+---@return string? error Error message if the client could not be created
+---@return MCP.Client? client The MCP client
+---@nodiscard
 function M:new(command)
   local self = setmetatable({}, { __index = M })
 
-  self.transport = stdio:new(command)
+  local err, transport = stdio:new(command)
+  if err then
+    return err, nil
+  end
+
+  ---@cast transport MCP.Transport.Stdio
+  self.transport = transport
   self.initialized = false
   self.capabilities = {
     sampling = {},
@@ -30,42 +66,41 @@ function M:new(command)
   self.server_info = {}
   self.protocol_version = "2024-11-05"
 
-  return self
+  return nil, self
 end
 
+---@async
 ---Start the client and initialize the connection to the server.
----@param callback function Callback function with (error, result) once the server is initialized
-function M:start(callback)
-  log.debug("Starting MCP client")
-  self.transport:start()
-
+---@return MCP.Transport.ResponseError? error The error received form the server
+---@return any? result The result of the initialization
+---@nodiscard
+function M:start()
+  dlog.debug("called start2")
   -- Initialize the server
   local client_info = {
-    name = "copilot-chat.nvim",
+    name = "mcp.nvim",
     version = "0.1.0" -- Replace with actual version
   }
 
-  self.transport:request("initialize", {
+  local err, result = self.transport:request_sync("initialize", {
     clientInfo = client_info,
     protocolVersion = self.protocol_version,
     capabilities = self.capabilities
-  }, function(err, result)
-    if err then
-      log.error("Failed to initialize MCP server: " .. vim.inspect(err))
-      callback(err, nil)
-      return
-    end
+  })
+  if err then
+    log.error("Failed to initialize MCP server: " .. vim.inspect(err))
+    return err, nil
+  end
 
-    log.debug("MCP server initialized: " .. vim.inspect(result))
-    self.server_capabilities = result.capabilities
-    self.server_info = result.serverInfo
-    self.protocol_version = result.protocolVersion
-    self.initialized = true
+  dlog.debug("MCP server initialized: " .. vim.inspect(result))
+  self.server_capabilities = result.capabilities
+  self.server_info = result.serverInfo
+  self.protocol_version = result.protocolVersion
+  self.initialized = true
 
-    -- Send initialized notification
-    -- self.transport:notify("notifications/initialized", {})
-    callback(nil, result)
-  end)
+  -- Send initialized notification
+  self.transport:notify("notifications/initialized", {})
+  return nil, result
 end
 
 ---Stop the client.
@@ -73,67 +108,39 @@ function M:stop()
   if not self.transport then
     return
   end
-
   self.transport:stop()
   self.initialized = false
 end
 
----@class Tool
----@field name string The name of the tool
----@field description string A description of the tool
----@field inputSchema table The JSON schema for the tool's input
-
----List available tools from the server.
----@param callback fun(err: string|nil, tools: CopilotChat.mcp.Tool[]|nil) Callback function with (error, tools)
-function M:list_tools(callback)
+---@async
+---List provided tools
+---@return MCP.Transport.ResponseError? # The error received form the server
+---@return { tools: MCP.Tool[] }? # The available tools
+---@nodiscard
+function M:list_tools()
   if not self.initialized then
-    callback("MCP client not initialized", nil)
-    return
+    error("MCP client not initialized")
   end
 
-  self.transport:request("tools/list", nil, callback)
+  local err, response = self.transport:request_sync("tools/list", nil)
+  return err, response and response.tools
 end
-
----@class CopilotChat.mcp.ToolResult
----@field err any|nil Error message or nil if successful
----@field result any|nil Result of the tool
 
 ---Call a tool on the server.
 ---@param name string Tool name
 ---@param arguments table Arguments for the tool
----@param callback fun(err?: , foo) Callback function with (error, result)
-function M:call_tool(name, arguments, callback)
+---@return MCP.Transport.ResponseError? error The error received form the server
+---@return MCP.ToolResult? result The result of the tool
+function M:call_tool(name, arguments)
+  dlog.debug("called call_tool")
   if not self.initialized then
-    callback("MCP client not initialized", nil)
-    return
+    error("MCP client not initialized", nil)
   end
 
-  self.transport:request("tools/call", {
+  return self.transport:request_sync("tools/call", {
     name = name,
     arguments = arguments or {}
-  }, callback)
-end
-
---- Call a tool on the server synchronously.
---- This function must be called within a coroutine.
---- @param name string Tool name
---- @param arguments table Arguments for the tool
---- @return string|table|nil err, table|nil result
-function M:call_tool_sync(name, arguments)
-  local co = coroutine.running()
-  if not co then
-    error("call_tool_sync must be called within a coroutine")
-  end
-
-  ---@type CopilotChat.mcp.ToolResult
-  local res = {}
-  self:call_tool(name, arguments, function(err, result)
-    res = { err = err, result = result }
-    coroutine.resume(co)
-  end)
-
-  coroutine.yield()
-  return res.err, res.result
+  })
 end
 
 ---List available resources from the server.

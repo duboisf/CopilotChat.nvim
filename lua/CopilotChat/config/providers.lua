@@ -134,6 +134,7 @@ M.copilot = {
       },
     })
 
+    print('curl response', vim.inspect(response))
     if err then
       error(err)
     end

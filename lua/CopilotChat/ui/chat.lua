@@ -99,7 +99,7 @@ end, Overlay)
 ---@return boolean
 function Chat:visible()
   return self.winnr and vim.api.nvim_win_is_valid(self.winnr) and vim.api.nvim_win_get_buf(self.winnr) == self.bufnr
-    or false
+      or false
 end
 
 --- Returns whether the chat window is focused.
@@ -124,8 +124,8 @@ function Chat:get_closest_section(type)
 
   for _, section in ipairs(self.sections) do
     local matches_type = not type
-      or (type == 'answer' and section.answer)
-      or (type == 'question' and not section.answer)
+        or (type == 'answer' and section.answer)
+        or (type == 'question' and not section.answer)
 
     if matches_type and section.start_line <= cursor_line and section.start_line > max_line_below_cursor then
       max_line_below_cursor = section.start_line
@@ -499,7 +499,7 @@ function Chat:render()
       if current_section then
         current_section.end_line = l - 1
         current_section.content =
-          vim.trim(table.concat(vim.list_slice(lines, current_section.start_line, current_section.end_line), '\n'))
+            vim.trim(table.concat(vim.list_slice(lines, current_section.start_line, current_section.end_line), '\n'))
         table.insert(sections, current_section)
       end
       current_section = {
@@ -512,7 +512,7 @@ function Chat:render()
       if current_section then
         current_section.end_line = l - 1
         current_section.content =
-          vim.trim(table.concat(vim.list_slice(lines, current_section.start_line, current_section.end_line), '\n'))
+            vim.trim(table.concat(vim.list_slice(lines, current_section.start_line, current_section.end_line), '\n'))
         table.insert(sections, current_section)
       end
       current_section = {
@@ -524,7 +524,7 @@ function Chat:render()
       if current_section then
         current_section.end_line = l
         current_section.content =
-          vim.trim(table.concat(vim.list_slice(lines, current_section.start_line, current_section.end_line), '\n'))
+            vim.trim(table.concat(vim.list_slice(lines, current_section.start_line, current_section.end_line), '\n'))
         table.insert(sections, current_section)
       end
     end
@@ -572,7 +572,7 @@ function Chat:render()
       elseif line == '```' and current_block then
         current_block.end_line = l - 1
         current_block.content =
-          table.concat(vim.list_slice(lines, current_block.start_line, current_block.end_line), '\n')
+            table.concat(vim.list_slice(lines, current_block.start_line, current_block.end_line), '\n')
         table.insert(current_section.blocks, current_block)
         current_block = nil
       end

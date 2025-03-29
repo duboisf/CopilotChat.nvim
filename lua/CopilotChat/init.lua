@@ -8,7 +8,19 @@ local mcp = require('CopilotChat.mcp.client')
 
 local dlog = require('plenary.log').new(
   {
-    plugin = "copilot-debug", level = "debug", outfile = "/tmp/copilot-debug-logs.txt"
+    fmt_msg = function(is_console, mode_name, src_path, src_line, msg)
+      local nameupper = mode_name:upper()
+      local lineinfo = string.format("%s:%d", src_path:match("([^/]+)$"), src_line)
+      if is_console then
+        return string.format("[%-6s%s] %s: %s", nameupper, os.date "%H:%M:%S", lineinfo, msg)
+      else
+        return string.format("[%-6s%s] %s: %s\n", nameupper, os.date(), lineinfo, msg)
+      end
+    end,
+    level = "debug",
+    plugin = "copilot-debug",
+    outfile = "/tmp/copilot-mcp-debug-logs.txt",
+    use_console = false,
   }, false
 )
 
@@ -197,44 +209,32 @@ end
 --- @return CopilotChat.ToolMessage[]
 local function handle_tool_calls(tool_calls)
   --- @type CopilotChat.ToolMessage[]
-  local tool_call_results = {}
   dlog.debug('handle_tool_calls: tool_calls =', tool_calls)
-  local co = coroutine.create(function()
-    tool_calls = tool_calls or {}
-    for _, tool_call in ipairs(tool_calls) do
-      local func = tool_call["function"]
-      local args = utils.json_decode(func.arguments)
-      if not args then
-        log.error(args)
-        return
-      end
-
-      local err, result = M.mcp_client:call_tool_sync(func.name, args)
-
-      dlog.debug(string.format("tool %s returned: err=%s, result=%s", func.name, vim.inspect(err), vim.inspect(result)))
-
-      if err or result == nil then
-        dlog.error(string.format("error calling tool %s: %s", func.name, err))
-        return
-      end
-      dlog.debug(string.format("tool %s returned: %s", func.name, vim.inspect(result)))
+  tool_calls = tool_calls or {}
+  local tool_call_results = {}
+  for _, tool_call in ipairs(tool_calls) do
+    local func = tool_call["function"]
+    local args = utils.json_decode(func.arguments)
+    if not args then
+      log.error(args)
+    else
+      local err, result = M.mcp_client:call_tool(func.name, args)
       for _, content in ipairs(result.content) do
         table.insert(tool_call_results, {
-          content = content.text,
+          content = err or content.text,
           name = func.name,
           role = 'tool',
           tool_call_id = tool_call.id,
         })
       end
     end
-  end)
-
-  coroutine.resume(co)
+  end
   return tool_call_results
 end
 
 --- Update the highlights for chat buffer
 local function update_highlights()
+  print('update_highlights')
   local selection_ns = vim.api.nvim_create_namespace('copilot-chat-selection')
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     vim.api.nvim_buf_clear_namespace(buf, selection_ns, 0, -1)
@@ -257,22 +257,19 @@ local function update_highlights()
     return
   end
 
-  async.run(function()
-    local items = M.complete_items()
-    utils.schedule_main()
+  local items = M.complete_items()
 
-    for _, item in ipairs(items) do
-      local pattern = vim.fn.escape(item.word, '.-$^*[]')
-      if vim.startswith(item.word, '#') then
-        vim.cmd('syntax match CopilotChatKeyword "' .. pattern .. '\\(:.\\+\\)\\?" containedin=ALL')
-      else
-        vim.cmd('syntax match CopilotChatKeyword "' .. pattern .. '" containedin=ALL')
-      end
+  for _, item in ipairs(items) do
+    local pattern = vim.fn.escape(item.word, '.-$^*[]')
+    if vim.startswith(item.word, '#') then
+      vim.cmd('syntax match CopilotChatKeyword "' .. pattern .. '\\(:.\\+\\)\\?" containedin=ALL')
+    else
+      vim.cmd('syntax match CopilotChatKeyword "' .. pattern .. '" containedin=ALL')
     end
+  end
 
-    vim.cmd('syntax match CopilotChatInput ":\\(.\\+\\)" contained containedin=CopilotChatKeyword')
-    state.highlights_loaded = true
-  end, noop)
+  vim.cmd('syntax match CopilotChatInput ":\\(.\\+\\)" contained containedin=CopilotChatKeyword')
+  state.highlights_loaded = true
 end
 
 --- Finish writing to chat buffer.
@@ -630,6 +627,7 @@ end
 --- Trigger the completion for the chat window.
 ---@param without_context boolean?
 function M.trigger_complete(without_context)
+  print('trigger_complete')
   local info = M.complete_info()
   local bufnr = vim.api.nvim_get_current_buf()
   local line = vim.api.nvim_get_current_line()
@@ -698,6 +696,7 @@ end
 ---@return table
 ---@async
 function M.complete_items()
+  print('complete_items')
   local models = client:list_models()
   local agents = client:list_agents()
   local prompts_to_use = M.prompts()
@@ -797,48 +796,59 @@ function M.prompts()
   return prompts_to_use
 end
 
+---@async
+--- Initialize the mcp client
+local function init_mcp_client()
+  local err, mcp_client = mcp:new({ 'mcp-local-fs' })
+  if err then
+    error(string.format("could not create mcp client: %s", err))
+  end
+  ---@cast mcp_client MCP.Client
+  M.mcp_client = mcp_client
+  local err, capabilities = M.mcp_client:start()
+  dlog.debug(string.format("mcp client started: err=%s, capabilities=%s", err, vim.inspect(capabilities)))
+  local err, mcp_tools = M.mcp_client:list_tools()
+  if err or mcp_tools == nil then
+    error(string.format("could not list tools: %s", err))
+  end
+  local tools = {}
+  for _, tool in ipairs(mcp_tools) do
+    table.insert(tools, {
+      type = "function",
+      ["function"] = {
+        name = tool.name,
+        description = tool.description,
+        parameters = tool.inputSchema,
+      },
+    })
+  end
+  M.tools = tools
+end
+
+---@async
 --- Open the chat window.
 ---@param config CopilotChat.config.shared?
 function M.open(config)
-  config = vim.tbl_deep_extend('force', M.config, config or {})
-  utils.return_to_normal_mode()
+  return coroutine.wrap(function()
+    config = vim.tbl_deep_extend('force', M.config, config or {})
+    utils.return_to_normal_mode()
 
-  M.chat:open(config)
+    init_mcp_client()
 
-  local section = M.chat:get_prompt()
-  if section then
-    local prompt = insert_sticky(section.content, config)
-    if prompt then
-      M.chat:set_prompt(prompt)
+    M.chat:open(config)
+
+    local section = M.chat:get_prompt()
+    if section then
+      local prompt = insert_sticky(section.content, config)
+      if prompt then
+        M.chat:set_prompt(prompt)
+      end
     end
-  end
 
-  M.mcp_client = mcp:new('mcp-local-fs')
-  log.debug("starting mcp client")
-  M.mcp_client:start(function(err, capabilities)
-    log.debug(string.format("mcp client started: err=%s, capabilities=%s", err, vim.inspect(capabilities)))
-    M.mcp_client:list_tools(function(err, mcp_tools)
-      if err or mcp_tools == nil then
-        error(string.format("could not list tools: %s", err))
-      end
-      local tools = {}
-      for _, tool in ipairs(mcp_tools.tools) do
-        table.insert(tools, {
-          type = "function",
-          ["function"] = {
-            name = tool.name,
-            description = tool.description,
-            parameters = tool.inputSchema,
-          },
-        })
-      end
-      log.debug("transformed list_tools=", vim.inspect(tools))
-      M.tools = tools
-    end)
-  end)
-
-  M.chat:follow()
-  M.chat:focus()
+    dlog.debug("follow, focus")
+    M.chat:follow()
+    M.chat:focus()
+  end)()
 end
 
 --- Close the chat window.
@@ -1066,7 +1076,7 @@ function M.ask(prompt, config)
         end),
       })
 
-      utils.schedule_main()
+      -- utils.schedule_main()
 
       local tool_call_results = handle_tool_calls(tool_calls)
 
@@ -1143,16 +1153,17 @@ function M.ask(prompt, config)
     until not client:has_tool_responses()
   end
 
-  dlog.debug('about to async run')
-  local ok, err = pcall(async.run, client_ask)
-  dlog.debug('done with async run, ok:', ok, 'err:', err)
+  dlog.debug('about to client_ask')
+  client_ask()
+  -- local ok, err = pcall(async.run, client_ask)
+  -- dlog.debug('done with async run, ok:', ok, 'err:', err)
 
-  if not ok then
-    log.error(err)
-    if not config.headless then
-      show_error(err)
-    end
-  end
+  -- if not ok then
+  --   log.error(err)
+  --   if not config.headless then
+  --     show_error(err)
+  --   end
+  -- end
 end
 
 --- Stop current copilot output and optionally reset the chat ten show the help message.

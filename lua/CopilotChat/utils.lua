@@ -433,38 +433,53 @@ end
 ---@param url string The url
 ---@param opts table? The options
 ---@async
-M.curl_get = async.wrap(function(url, opts, callback)
-  local args = {
-    on_error = function(err)
-      callback(nil, err and err.stderr or err)
-    end,
-  }
+function M.curl_get(url, opts)
+  local thread = nil
+  local error = nil
+  local resp = nil
+  thread = coroutine.create(function()
+    local args = {
+      on_error = function(err)
+        print('curl_get: error:', vim.inspect(err))
+        error = err
+      end,
+    }
 
-  args = vim.tbl_deep_extend('force', M.curl_args, args)
-  args = vim.tbl_deep_extend('force', args, opts or {})
+    args = vim.tbl_deep_extend('force', M.curl_args, args)
+    args = vim.tbl_deep_extend('force', args, opts or {})
 
-  args.callback = function(response)
-    if response and not vim.startswith(tostring(response.status), '20') then
-      callback(response, response.body)
-      return
+    args.callback = function(response)
+      if response and not vim.startswith(tostring(response.status), '20') then
+        print('curl_get: non-20x status:', vim.inspect(response))
+        resp = response
+        return
+      end
+
+      if not args.json_response then
+        print('curl_get: non-json response:', vim.inspect(response))
+        resp = response
+        return
+      end
+
+      local body, err = M.json_decode(tostring(response.body))
+      if err then
+        print('curl_get: json decode error:', err)
+        error = err
+        resp = response
+        return
+      else
+        response.body = body
+        print('curl_get: json response:', vim.inspect(response))
+        resp = response
+      end
     end
-
-    if not args.json_response then
-      callback(response)
-      return
-    end
-
-    local body, err = M.json_decode(tostring(response.body))
-    if err then
-      callback(response, err)
-    else
-      response.body = body
-      callback(response)
-    end
+    curl.get(url, args)
+  end)
+  while not error and not resp do
+    coroutine.resume(thread)
   end
-
-  curl.get(url, args)
-end, 3)
+  return error, resp
+end
 
 --- Send curl post request
 ---@param url string The url
@@ -618,19 +633,19 @@ end
 ---@param path string The file path
 ---@async
 function M.read_file(path)
-  local err, fd = async.uv.fs_open(path, 'r', 438)
+  local fd, err = vim.uv.fs_open(path, 'r', 438)
   if err or not fd then
     return nil
   end
 
-  local err, stat = async.uv.fs_fstat(fd)
+  local stat, err = vim.uv.fs_fstat(fd)
   if err or not stat then
     async.uv.fs_close(fd)
     return nil
   end
 
-  local err, data = async.uv.fs_read(fd, stat.size, 0)
-  async.uv.fs_close(fd)
+  local data, err = vim.uv.fs_read(fd, stat.size, 0)
+  vim.uv.fs_close(fd)
   if err or not data then
     return nil
   end

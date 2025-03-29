@@ -9,78 +9,123 @@ local dlog = require('plenary.log').new(
         return string.format("[%-6s%s] %s: %s\n", nameupper, os.date(), lineinfo, msg)
       end
     end,
-    plugin = "copilot-debug",
     level = "debug",
-    outfile = "/tmp/copilot-mcp-debug-logs.txt"
+    plugin = "copilot-debug",
+    outfile = "/tmp/copilot-mcp-debug-logs.txt",
+    use_console = false,
   }, false
 )
 
----@diagnostic disable: missing-fields
-local utils = require("CopilotChat.utils")
 local log = require("plenary.log")
 
----@class MCP.Transport.Stdio
----@field command string The command to execute for the MCP server.
+---@alias JsonRPCVersion "2.0"
+
+---@class MCP.Transport.Response
+---@field jsonrpc JsonRPCVersion The JSON-RPC version.
+---@field id number The ID of the request.
+---@field result? { [string]: any } The result of the request.
+---@field error? MCP.Transport.ResponseError The error of the request.
+
+---@alias MCP.Transport.ResponseCallback fun(err?: MCP.Transport.ResponseError, result?: any)
+
+---@class MCP.Transport.ResponseError
+---@field code any The error code.
+---@field message string The error message.
+---@field data? any Additional error data.
+
+---@alias Stdio MCP.Transport.Stdio
+
+---@class MCP.Transport.Notification
+---@field jsonrpc JsonRPCVersion
+---@field method string
+---@field params { [string]: any } The result of the request.
+
+---@alias MCP.Transport.Message MCP.Transport.Response|MCP.Transport.Notification
+
+---@class (exact) MCP.Transport.Stdio
 ---@field job_id number|nil The ID of the job associated with the MCP client.
 ---@field next_id number The next request ID to use.
----@field pending_requests table<number, fun(...: any): any> A table of pending requests indexed by ID.
----@field notification_handlers table<string, function> A table of notification handlers indexed by event name.
+---@field pending_requests { [number]: MCP.Transport.ResponseCallback } A dict of pending requests with their callback functions indexed by request ID.
+---@field notification_handlers { [string]: fun(params: { [string]: any}) } A table of notification handlers indexed by event name.
 local M = {}
 
----Creates a new MCPClient instance.
----@param command string The command to execute for the MCP server.
----@return MCP.Transport.Stdio
-function M:new(command)
-  local self = setmetatable({}, { __index = M })
-  self.command = command
-  self.job_id = nil
-  self.next_id = 1
-  self.pending_requests = {}
-  self.notification_handlers = {}
-  return self
+---Handle incoming server data on stdout
+---@param self Stdio
+---@return fun(job_id: number, data: any, event: string) # The job's on_stdout callback
+local function on_stdout(self)
+  return function(_, data, _)
+    dlog.debug("on_stdout: data=", data)
+    for _, line in ipairs(data) do
+      if line ~= "" then
+        local ok, res = pcall(vim.json.decode, line)
+        if not ok then
+          log.error(string.format("Failed to decode message, err='%s', line='%s'", res, line))
+        else
+          ---@cast res MCP.Transport.Message
+          self:handle_message(res)
+        end
+      end
+    end
+  end
 end
 
 ---Starts the MCP server process.
-function M:start()
+---@param self MCP.Transport.Stdio
+---@param mcp_server_command string[]
+---@return string? error
+---@nodiscard
+local function start(self, mcp_server_command)
+  if type(mcp_server_command) ~= "table" then
+    return "start: mcp_server_command must be an array"
+  end
   local job_id = vim.fn.jobstart(
-    self.command,
+    mcp_server_command,
     {
-      -- change to "pipe" or "file" based on your needs
-      on_stdout = function(job_id, data, event)
+      on_stdout = on_stdout(self),
+      on_stderr = vim.schedule_wrap(function(job_id, data, event)
+        dlog.debug('received stderr data:', job_id, data, event)
         if data then
-          log.debug("on_stdout: data=", data)
           for _, line in ipairs(data) do
             if line ~= "" then
-              local message, err = utils.json_decode(line)
-              if err then
-                log.error("Failed to decode message: " .. err .. " - " .. line)
-                return
-              end
-              self:handle_message(message)
+              dlog.error("MCP server stderr: " .. line)
             end
           end
         end
-      end,
-      on_stderr = vim.schedule_wrap(function(job_id, data, event)
-        log.debug('received stdout data:', job_id, data, event)
-        if data then
-          for _, line in ipairs(data) do
-            log.error("MCP server stderr: " .. line)
-          end
-        end
       end),
-      on_exit = vim.schedule_wrap(function(job_id, code, event)
+      on_exit = function(_, code, _)
         log.debug(string.format("MCP server exited with code %d", code))
         self:close()
-      end),
+      end,
       detach = false,
       pty = false,
     }
   )
   if job_id == 0 then
-    error("could not start mcp client")
+    return "start: invalid jobstart arguments"
+  elseif job_id == -1 then
+    return string.format("start: '%s' is not executable", mcp_server_command[1])
   end
+  dlog.debug('MCP server started with job_id:', job_id)
   self.job_id = job_id
+end
+
+---Creates a new MCPClient instance.
+---@param mcp_server_command string[] The MCP server command and arguments
+---@return string? error
+---@return MCP.Transport.Stdio?
+---@nodiscard
+function M:new(mcp_server_command)
+  local self = setmetatable({}, { __index = M })
+  self.job_id = nil
+  self.next_id = 1
+  self.pending_requests = {}
+  self.notification_handlers = {}
+
+  local err = start(self, mcp_server_command)
+  if err then
+    return err, nil
+  end
+  return nil, self
 end
 
 ---Stops the MCP server process.
@@ -98,8 +143,8 @@ end
 
 ---Sends a request to the MCP server.
 ---@param method string The method to call.
----@param params table The parameters to pass to the method.
----@param callback fun(...: any): any The callback function to call when the response is received.
+---@param params? table The parameters to pass to the method.
+---@param callback MCP.Transport.ResponseCallback  callback function to call when the response is received.
 function M:request(method, params, callback)
   local id = self.next_id
   self.next_id = self.next_id + 1
@@ -111,11 +156,10 @@ function M:request(method, params, callback)
     params = params,
   }
 
+
   self.pending_requests[id] = callback
 
-  log.debug('stdio:request: message=', vim.inspect(request))
   local message = vim.json.encode(request) .. "\n"
-  log.debug('stdio:request: message=', message)
 
   local bytes_written = vim.fn.chansend(self.job_id, message)
   if bytes_written == 0 then
@@ -123,25 +167,40 @@ function M:request(method, params, callback)
   end
 end
 
----Sends a synchronous request to the MCP server.
+---@async
+---Sends a request to the MCP server.
 ---@param method string The method to call.
----@param params table The parameters to pass to the method.
----@return string|table|nil, table|nil
-function M:request_sync(endpoint, payload)
-  local co = coroutine.running()
-  if not co then
+---@param params? table The parameters to pass to the method.
+---@return MCP.Transport.ResponseError? error The error returned by the server.
+---@return any? result The result of the request.
+function M:request_sync(method, params)
+  local thread = coroutine.running()
+  if not thread then
     error("request_sync must be called within a coroutine")
   end
 
-  local callback_err, callback_result
-  self:request(endpoint, payload, function(err, result)
-    callback_err = err
-    callback_result = result
-    coroutine.resume(co)
-  end)
+  local id = self.next_id
+  self.next_id = self.next_id + 1
 
-  coroutine.yield()
-  return callback_err, callback_result
+  local request = {
+    jsonrpc = "2.0",
+    id = id,
+    method = method,
+    params = params,
+  }
+
+  self.pending_requests[id] = function(err, result)
+    coroutine.resume(thread, err, result)
+  end
+
+  local message = vim.json.encode(request) .. "\n"
+
+  local bytes_written = vim.fn.chansend(self.job_id, message)
+  if bytes_written == 0 then
+    error('failed to send request to mcp server')
+  end
+
+  return coroutine.yield()
 end
 
 ---Sends a notification to the MCP server.
@@ -154,7 +213,7 @@ function M:notify(method, params)
     params = params,
   }
 
-  local message = utils.json_encode(notification) .. "\n"
+  local message = vim.json.encode(notification) .. "\n"
   vim.fn.chansend(self.job_id, message)
 end
 
@@ -164,21 +223,6 @@ end
 function M:on_notification(method, handler)
   self.notification_handlers[method] = handler
 end
-
----@alias JsonRPCVersion "2.0"
-
----@class MCP.Transport.Response
----@field jsonrpc JsonRPCVersion The JSON-RPC version.
----@field id number The ID of the request.
----@field result? { [string]: any } The result of the request.
----@field error? {code: any, message: string, data?: any} The error of the request.
-
----@alias Stdio MCP.Transport.Stdio
-
----@class MCP.Transport.Notification
----@field jsonrpc JsonRPCVersion
----@field method string
----@field params { [string]: any } The result of the request.
 
 ---Handle response from server
 ---@param self Stdio
