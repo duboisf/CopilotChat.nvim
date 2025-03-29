@@ -190,6 +190,7 @@ M.copilot = {
 
     local resp = nil
     local err = nil
+    local finished = false
     utils.curl_get('https://api.githubcopilot.com/agents', {
         json_response = true,
         headers = headers,
@@ -197,13 +198,14 @@ M.copilot = {
       function(response, error)
         resp = response
         err = error
+        finished = true
         coroutine.resume(thread)
       end
     )
 
     coroutine.yield()
 
-    dlog.debug('get_agents response')
+    dlog.debug('get_agents response, finished:', finished)
     if err then
       error(err)
     end

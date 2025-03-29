@@ -1335,6 +1335,7 @@ function M.setup(config)
       end
 
       vim.api.nvim_create_autocmd({ 'BufEnter', 'BufLeave' }, {
+        once = true,
         buffer = bufnr,
         callback = function(ev)
           if ev.event == 'BufEnter' then
@@ -1345,6 +1346,8 @@ function M.setup(config)
             dlog.debug(debug.traceback("START update_highlights, fetching agents and models"))
             dlog.debug("START update_highlights, fetching agents and models")
             update_highlights()
+            client:fetch_agents()
+            client:fetch_models()
             dlog.debug("done update_highlights")
             dlog.debug("DONE update_highlights, fetching agents and models")
           end)()

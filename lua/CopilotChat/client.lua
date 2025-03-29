@@ -360,14 +360,21 @@ function Client:authenticate(provider_name)
   return headers or {}
 end
 
+---@async
 --- Fetch models from the Copilot API
 ---@return table<string, CopilotChat.Client.model>
 function Client:fetch_models()
-  dlog.debug('fetch_models')
+  dlog.debug('client:fetch_models, is fetching:', self.fetching_models, 'thread:', coroutine.running())
+  -- while self.fetching_models do
+  --   dlog.debug('client:waiting for models', debug.traceback())
+  --   coroutine.yield()
+  --   dlog.debug('client:waiting for models, finished yielding')
+  -- end
   if self.models then
     dlog.debug('early return models')
     return self.models
   end
+  self.fetching_models = true
 
   local models = {}
   local provider_order = vim.tbl_keys(self.providers)
@@ -404,6 +411,7 @@ function Client:fetch_models()
   end
 
   self.models = models
+  self.fetching_models = false
   return self.models
 end
 
