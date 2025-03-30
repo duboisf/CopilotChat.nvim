@@ -1,3 +1,5 @@
+---@diagnostic disable-next-line: undefined-global
+local vim = vim
 local async = require('plenary.async')
 local log = require('plenary.log')
 local context = require('CopilotChat.context')
@@ -627,7 +629,6 @@ end
 --- Trigger the completion for the chat window.
 ---@param without_context boolean?
 function M.trigger_complete(without_context)
-  print('trigger_complete')
   local info = M.complete_info()
   local bufnr = vim.api.nvim_get_current_buf()
   local line = vim.api.nvim_get_current_line()
@@ -834,7 +835,7 @@ function M.open(config)
     config = vim.tbl_deep_extend('force', M.config, config or {})
     utils.return_to_normal_mode()
 
-    init_mcp_client()
+    -- init_mcp_client()
 
     M.chat:open(config)
 
@@ -854,7 +855,9 @@ end
 
 --- Close the chat window.
 function M.close()
-  M.mcp_client:stop()
+  if M.mcp_client then
+    M.mcp_client:stop()
+  end
   M.chat:close(state.source and state.source.bufnr or nil)
 end
 
@@ -1026,6 +1029,7 @@ function M.ask(prompt, config)
   local selection = M.get_selection()
 
   local client_ask = function()
+    dlog.debug('inside client_ask')
     local selected_agent, prompt = M.resolve_agent(prompt, config)
     local selected_model, prompt = M.resolve_model(prompt, config)
     local embeddings, prompt = M.resolve_context(prompt, config)
@@ -1034,6 +1038,7 @@ function M.ask(prompt, config)
         pcall(context.filter_embeddings, prompt, selected_model, config.headless, embeddings)
 
     if not query_ok then
+      dlog.debug('error in filter_embeddings')
       utils.schedule_main()
       log.error(filtered_embeddings)
       if not config.headless then
@@ -1043,6 +1048,7 @@ function M.ask(prompt, config)
     end
 
     repeat
+      dlog.debug('calling client.ask')
       local ask_ok, response, tool_calls, references, token_count, token_max_count = pcall(client.ask, client, prompt, {
         headless = config.headless,
         contexts = contexts,
@@ -1054,6 +1060,7 @@ function M.ask(prompt, config)
         tools = M.tools,
         temperature = config.temperature,
         on_progress = vim.schedule_wrap(function(token)
+          dlog.debug('on_progress')
           local out = config.stream and config.stream(token, state.source) or nil
           if out == nil then
             out = token
@@ -1064,6 +1071,7 @@ function M.ask(prompt, config)
           end
         end),
         on_tool_call = vim.schedule_wrap(function(tool_call)
+          dlog.debug('on_tool_call:', tool_call)
           ---@type CopilotChat.ToolCall
           tool_call = tool_call
           local func = tool_call["function"]
@@ -1155,7 +1163,7 @@ function M.ask(prompt, config)
   end
 
   dlog.debug('about to client_ask')
-  client_ask()
+  coroutine.wrap(function() client_ask() end)()
   -- local ok, err = pcall(async.run, client_ask)
   -- dlog.debug('done with async run, ok:', ok, 'err:', err)
 
@@ -1170,28 +1178,31 @@ end
 --- Stop current copilot output and optionally reset the chat ten show the help message.
 ---@param reset boolean?
 function M.stop(reset)
-  local stopped = false
+  coroutine.wrap(function()
+    dlog.debug('STOP')
+    local stopped = false
 
-  if reset then
-    client:reset()
-    M.chat:clear()
-    vim.diagnostic.reset(vim.api.nvim_create_namespace('copilot-chat-diagnostics'))
-    state.last_prompt = nil
-    state.last_response = nil
+    if reset then
+      client:reset()
+      M.chat:clear()
+      vim.diagnostic.reset(vim.api.nvim_create_namespace('copilot-chat-diagnostics'))
+      state.last_prompt = nil
+      state.last_response = nil
 
-    -- Clear the selection
-    if state.source then
-      M.set_selection(state.source.bufnr, 0, 0, true)
+      -- Clear the selection
+      if state.source then
+        M.set_selection(state.source.bufnr, 0, 0, true)
+      end
+
+      stopped = true
+    else
+      stopped = client:stop()
     end
 
-    stopped = true
-  else
-    stopped = client:stop()
-  end
-
-  if stopped then
-    finish(reset)
-  end
+    if stopped then
+      finish(reset)
+    end
+  end)()
 end
 
 --- Reset the chat window and show the help message.
@@ -1335,7 +1346,6 @@ function M.setup(config)
       end
 
       vim.api.nvim_create_autocmd({ 'BufEnter', 'BufLeave' }, {
-        once = true,
         buffer = bufnr,
         callback = function(ev)
           if ev.event == 'BufEnter' then
@@ -1381,9 +1391,9 @@ function M.setup(config)
             local char = line:sub(col, col)
 
             if vim.tbl_contains(M.complete_info().triggers, char) then
-              utils.debounce('complete', function()
+              utils.debounce('complete', coroutine.wrap(function()
                 M.trigger_complete(true)
-              end, 100)
+              end), 100)
             end
           end,
         })

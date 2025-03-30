@@ -1,3 +1,5 @@
+---@diagnostic disable: undefined-global
+local vim = vim
 local async = require('plenary.async')
 local curl = require('plenary.curl')
 local scandir = require('plenary.scandir')
@@ -447,6 +449,7 @@ function M.curl_store_args(args)
   return M.curl_args
 end
 
+---@async
 --- Send curl get request
 ---@param url string The url
 ---@param opts table? The options
@@ -487,11 +490,16 @@ end
 ---@param url string The url
 ---@param opts table? The options
 ---@async
-M.curl_post = async.wrap(function(url, opts, callback)
+function M.curl_post(url, opts)
+  local thread = coroutine.running()
+  if not thread then
+    error('curl_post must be called within a coroutine')
+  end
+
+  dlog.debug("called curl_post")
   local args = {
-    callback = callback,
     on_error = function(err)
-      callback(nil, err and err.stderr or err)
+      coroutine.resume(thread, nil, err and err.stderr or err)
     end,
   }
 
@@ -506,21 +514,21 @@ M.curl_post = async.wrap(function(url, opts, callback)
 
   args.callback = function(response)
     if response and not vim.startswith(tostring(response.status), '20') then
-      callback(response, response.body)
+      coroutine.resume(thread, response, response.body)
       return
     end
 
     if not args.json_response then
-      callback(response)
+      coroutine.resume(thread, response)
       return
     end
 
     local body, err = M.json_decode(tostring(response.body))
     if err then
-      callback(response, err)
+      coroutine.resume(thread, response, err)
     else
       response.body = body
-      callback(response)
+      coroutine.resume(thread, response)
     end
   end
 
@@ -533,7 +541,10 @@ M.curl_post = async.wrap(function(url, opts, callback)
   end
 
   curl.post(url, args)
-end, 3)
+  local resp, err = coroutine.yield()
+  dlog.debug("curl_post response")
+  return resp, err
+end
 
 ---@class CopilotChat.utils.scan_dir_opts
 ---@field max_count number? The maximum number of files to scan

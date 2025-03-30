@@ -1,3 +1,5 @@
+---@diagnostic disable-next-line: undefined-global
+local vim = vim
 ---@class CopilotChat.Client.ask
 ---@field headless boolean
 ---@field contexts table<string, string>?
@@ -364,38 +366,49 @@ end
 --- Fetch models from the Copilot API
 ---@return table<string, CopilotChat.Client.model>
 function Client:fetch_models()
-  dlog.debug('client:fetch_models, is fetching:', self.fetching_models, 'thread:', coroutine.running())
-  -- while self.fetching_models do
-  --   dlog.debug('client:waiting for models', debug.traceback())
-  --   coroutine.yield()
-  --   dlog.debug('client:waiting for models, finished yielding')
-  -- end
+  local thread = coroutine.running()
+  dlog.debug('Client:fetch_models: is fetching:', self.fetching_models, 'thread:', coroutine.running())
+  if not thread then
+    error('Client:fetch_models: fetch_models must be called from a coroutine')
+  end
+
   if self.models then
-    dlog.debug('early return models')
+    dlog.debug('Client:fetch_models: early return models')
     return self.models
   end
+
+  if self.fetching_models then
+    self._fetch_models_waiters = self._fetch_models_waiters or {}
+    table.insert(self._fetch_models_waiters, thread)
+    dlog.debug('Client:fetch_models: waiting for fetch_models')
+    coroutine.yield()
+    dlog.debug('Client:fetch_models: done with fetching_models, thread', thread, ', returning', self.models)
+    return self.models
+  end
+
   self.fetching_models = true
 
   local models = {}
   local provider_order = vim.tbl_keys(self.providers)
   table.sort(provider_order)
   for _, provider_name in ipairs(provider_order) do
-    dlog.debug('fetch_models provider name:', provider_name)
+    dlog.debug('Client:fetch_models: fetch_models provider name:', provider_name)
     local provider = self.providers[provider_name]
     if not provider.disabled and provider.get_models then
       notify.publish(notify.STATUS, 'Fetching models from ' .. provider_name)
+      dlog.debug('Client:fetch_models: Fetching models from provider:', provider_name)
       local ok, headers = pcall(self.authenticate, self, provider_name)
       if not ok then
-        log.warn('Failed to authenticate with ' .. provider_name .. ': ' .. headers)
+        log.warn('Client:fetch_models: Failed to authenticate with ' .. provider_name .. ': ' .. headers)
         goto continue
       end
-      dlog.debug('authenticated with provider:', provider_name)
+      dlog.debug('Client:fetch_models: authenticated with provider:', provider_name)
       local ok, provider_models = pcall(provider.get_models, headers)
       if not ok then
-        log.warn('Failed to fetch models from ' .. provider_name .. ': ' .. provider_models)
+        log.warn('Client:fetch_models: Failed to fetch models from ' .. provider_name .. ': ' .. provider_models)
         goto continue
       end
-      dlog.debug('got models from provider:', provider_name)
+      dlog.debug('Client:fetch_models: got models from provider:', provider_name)
 
       for _, model in ipairs(provider_models) do
         model.provider = provider_name
@@ -405,23 +418,47 @@ function Client:fetch_models()
         models[model.id] = model
       end
 
-      dlog.debug('done with models from provider:', provider_name)
+      dlog.debug('Client:fetch_models: done with models from provider:', provider_name)
       ::continue::
     end
   end
 
+  dlog.debug('Client:fetch_models: done with fetch_models')
   self.models = models
   self.fetching_models = false
+  for _, waiter in ipairs(self._fetch_models_waiters or {}) do
+    dlog.debug('Client:fetch_models: resuming model waiter', waiter)
+    coroutine.resume(waiter)
+  end
   return self.models
 end
 
+---@async
 --- Fetch agents from the Copilot API
 ---@return table<string, CopilotChat.Client.agent>
 function Client:fetch_agents()
+  local thread = coroutine.running()
+  dlog.debug('fetch_agents, is fetching:', self.fetching_agents, 'thread:', coroutine.running())
+  if not thread then
+    error('fetch_agents must be called from a coroutine')
+  end
+
   dlog.debug('fetch_agents')
   if self.agents then
+    dlog.debug('returning cached fetch_agents')
     return self.agents
   end
+
+  if self.fetching_agents then
+    self._fetch_agents_waiters = self._fetch_agents_waiters or {}
+    table.insert(self._fetch_agents_waiters, thread)
+    dlog.debug('waiting for fetch_agents')
+    local res = coroutine.yield()
+    dlog.debug('done with fetch_agents, returning', res)
+    return res
+  end
+
+  self.fetching_agents = true
 
   local agents = {}
   local provider_order = vim.tbl_keys(self.providers)
@@ -453,7 +490,13 @@ function Client:fetch_agents()
     end
   end
 
+  dlog.debug('done with fetch_agents')
   self.agents = agents
+  self.fetching_agents = false
+  for _, waiter in ipairs(self._fetch_agents_waiters or {}) do
+    dlog.debug('resuming agent waiter', waiter)
+    coroutine.resume(waiter, self.agents)
+  end
   return self.agents
 end
 
@@ -462,7 +505,7 @@ end
 ---@param opts CopilotChat.Client.ask: Options for the request
 ---@return string?, CopilotChat.ToolCall[], table?, number?, number?
 function Client:ask(prompt, opts)
-  print('ask')
+  dlog.debug("Inside Client:ask")
   opts = opts or {}
 
   if opts.agent == 'none' or opts.agent == 'copilot' then
@@ -482,8 +525,9 @@ function Client:ask(prompt, opts)
 
   log.debug('model config:', vim.inspect(model_config))
 
+  dlog.debug("fetching agents in Client:ask")
   local agents = self:fetch_agents()
-  dlog.debug('fetch_agents')
+  dlog.debug('done fetching agents in Client:ask')
   local agent_config = opts.agent and agents[opts.agent]
   if opts.agent and not agent_config then
     error('Agent not found: ' .. opts.agent)
@@ -526,6 +570,8 @@ function Client:ask(prompt, opts)
   local generated_messages = {}
   local selection_messages = generate_selection_messages(opts.selection)
   local embeddings_messages = generate_embeddings_messages(opts.embeddings)
+
+  dlog.debug("done generating messages")
 
   for _, message in ipairs(selection_messages) do
     table.insert(generated_messages, message)
@@ -706,14 +752,16 @@ function Client:ask(prompt, opts)
     self.current_job = job_id
   end
 
+  dlog.debug("getting authentication headers")
   local headers = self:authenticate(provider_name)
+  dlog.debug("preparing input")
   local request = provider.prepare_input(
-    generate_ask_request(history, opts.contexts, prompt, opts.system_prompt, generated_messages),
+    generate_ask_request(history, opts.contexts, prompt, opts.system_prompt, generated_messages, #tool_calls > 0),
     options
   )
+  dlog.debug("prepared input")
 
   local tmp_request = vim.tbl_deep_extend('force', {}, request)
-  tmp_request.tools = nil
   log.debug('request:', tmp_request)
 
   local is_stream = request.stream
@@ -727,7 +775,9 @@ function Client:ask(prompt, opts)
     args.stream = stream_func
   end
 
+  dlog.debug("posting question")
   local response, err = utils.curl_post(provider.get_url(options), args)
+  dlog.debug("got response")
 
   if not opts.headless then
     if self.current_job ~= job_id then
@@ -737,9 +787,9 @@ function Client:ask(prompt, opts)
     self.current_job = nil
   end
 
-  -- log.debug('Response status:', response.status)
-  -- log.debug('Response body:\n', response.body)
-  -- log.debug('Response headers:\n', response.headers)
+  log.debug('Response status:', response.status)
+  log.debug('Response body:\n', response.body)
+  log.debug('Response headers:\n', response.headers)
 
   if err then
     local error_msg = 'Failed to get response: ' .. err
